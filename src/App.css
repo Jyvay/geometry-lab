@@ -1,0 +1,6 @@
+html, body, #root { height: 100%; margin: 0; background: #0b1220; color: #e2e8f0; font-family: system-ui, sans-serif; }
+.ui { position: absolute; top: 12px; left: 12px; background: rgba(15,23,42,.7); border:1px solid #334155; padding: 10px 12px; border-radius: 12px; backdrop-filter: blur(6px); }
+select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius: 10px; padding: 6px 10px; }
+button { cursor: pointer; }
+.row { display:flex; gap:8px; align-items:center; }
+.small { font-size: 12px; opacity: .85; }
