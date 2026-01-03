@@ -1,6 +1,275 @@
-html, body, #root { height: 100%; margin: 0; background: #0b1220; color: #e2e8f0; font-family: system-ui, sans-serif; }
-.ui { position: absolute; top: 12px; left: 12px; background: rgba(15,23,42,.7); border:1px solid #334155; padding: 10px 12px; border-radius: 12px; backdrop-filter: blur(6px); }
-select, button { background:#0f172a; color:#e2e8f0; border:1px solid #334155; border-radius: 10px; padding: 6px 10px; }
-button { cursor: pointer; }
-.row { display:flex; gap:8px; align-items:center; }
-.small { font-size: 12px; opacity: .85; }
+:root {
+  --bg: #f4f6fb;
+  --panel: #ffffff;
+  --border: #d7deea;
+  --text: #0f172a;
+  --muted: #5b6b82;
+
+  --green: #16a34a;
+  --blue: #2563eb;
+  --purple: #7c3aed;
+
+  --shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  --radius: 18px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app-root {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 18px 18px 22px;
+}
+
+.app-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: -0.2px;
+}
+
+.app-header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.space-select {
+  display: grid;
+  gap: 8px;
+  min-width: 280px;
+}
+
+.space-select label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.space-select select {
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.space-select .tiny {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.main-layout {
+  display: grid;
+  grid-template-columns: 1fr 520px;
+  gap: 14px;
+  align-items: start;
+}
+
+/* LEFT COLUMN = canvas + measure shell stacked */
+.left-col {
+  display: grid;
+  gap: 12px;
+}
+
+.canvas-panel {
+  position: relative;
+  background: var(--panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 12px;
+}
+
+.canvas-panel canvas {
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: #fff;
+  cursor: crosshair;
+}
+
+.canvas-hud {
+  position: absolute;
+  left: 18px;
+  top: 18px;
+  background: rgba(255,255,255,0.78);
+  backdrop-filter: blur(7px);
+  border: 1px solid rgba(215,222,234,0.9);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: 0 10px 25px rgba(15,23,42,0.12);
+  font-size: 12px;
+}
+
+/* CONTROLS: now 2-column grid inside the panel */
+.controls-panel {
+  background: var(--panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding: 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;  /* (e) */
+  gap: 12px;
+  align-content: start;
+}
+
+/* formula card full width */
+.formula-card {
+  grid-column: 1 / -1;
+  background: #f7f9ff;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.formula-title {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+
+.formula-text {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
+  font-size: 12px;
+  color: #223047;
+  white-space: pre-wrap;
+}
+
+/* Each section behaves as a compact card */
+.section {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fff;
+  display: grid;
+  gap: 8px;
+}
+
+.section h2 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  letter-spacing: -0.1px;
+}
+
+.section h3 {
+  margin: 6px 0 4px;
+  font-size: 12.5px;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 10px;
+  background: #fff;
+  display: grid;
+  gap: 8px;
+}
+
+.card label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.card input[type="number"] {
+  width: 100%;
+  padding: 9px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  outline: none;
+  font-size: 14px;
+}
+
+.card input[type="range"] { width: 100%; }
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.tiny {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.btn {
+  border: 1px solid transparent;
+  border-radius: 12px;
+  padding: 9px 10px;
+  font-weight: 650;
+  font-size: 13px;
+  cursor: pointer;
+  transition: transform 0.02s ease, filter 0.12s ease;
+}
+
+.btn:active { transform: translateY(1px); }
+.btn:disabled { cursor: not-allowed; opacity: 0.55; }
+
+.btn.green { background: var(--green); color: #fff; }
+.btn.blue  { background: var(--blue); color: #fff; }
+.btn.purple{ background: var(--purple); color: #fff; }
+
+.btn.gray {
+  background: #eef2f7;
+  color: #1f2a44;
+  border-color: #dde5f0;
+}
+
+.btn.dark {
+  background: #0f172a;
+  color: #fff;
+}
+
+/* MEASURE SHELL under canvas */
+.measure-shell {
+  border-radius: var(--radius);
+  border: 1px solid #0b1223;
+  background: #020617;
+  box-shadow: 0 16px 40px rgba(2,6,23,0.35);
+  padding: 14px 16px;
+  min-height: 110px;
+}
+
+.measure-shell pre {
+  margin: 0;
+  color: #22c55e;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono";
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+@media (max-width: 1400px) {
+  .main-layout { grid-template-columns: 1fr; }
+  .controls-panel { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 900px) {
+  .controls-panel { grid-template-columns: 1fr; }
+}
