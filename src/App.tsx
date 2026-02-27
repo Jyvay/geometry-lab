@@ -1963,16 +1963,7 @@ export default function App() {
     ctx.fillStyle = "#0f172a";
     ctx.fillText("🐸", fp.x, fp.y);
 
-    const dir = frogHeadingWorldDir(st);
-    const tip = worldToScreen(vp, { x: fw.x + dir.x * 0.2, y: fw.y + dir.y * 0.2 });
-    ctx.strokeStyle = "#16a34a";
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(fp.x, fp.y);
-    ctx.lineTo(tip.x, tip.y);
-    ctx.stroke();
-
-    // Frog speech bubble (simple)
+      // Frog speech bubble (simple)
     if (frogSpeech) {
       ctx.save();
       ctx.font = "14px ui-sans-serif, system-ui";
@@ -2070,10 +2061,6 @@ export default function App() {
         </div>
 
         <aside className="controls-panel">
-          <div className="formula-card">
-            <div className="formula-title">{formula.title}</div>
-            <pre className="formula-text">{formula.formula}</pre>
-          </div>
 
           <section className="section">
             <h2>Réglages</h2>
@@ -2134,7 +2121,7 @@ export default function App() {
                     <option value="ANY">Triangle quelconque</option>
                   </select>
                   <div className="tiny">
-                    Remarque : les types utilisent une construction euclidienne dans le modèle (C est ajusté si créé pendant la commande).
+                    Remarque : les points crées peuvent être ajustés automatiquement pour respecter la demande.
                   </div>
                 </>
               )}
