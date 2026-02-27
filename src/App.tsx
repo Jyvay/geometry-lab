@@ -9,19 +9,15 @@ import {
   frogWorldPos,
   frogHeadingWorldDir,
   spaceFormula,
-  buildAdvancePath,
-  buildGeodesicTrace,
-  buildCircleTrace,
-  startTracing,
-  finishTracing,
   animatePath,
   stepAnimation,
-  buildTurnAnim,
+  startTracing,
+  finishTracing,
+  buildCircleTrace,
   geodesicBetween,
   geodesicLineThrough,
   hyperbolicParallelThroughPoint,
   hyperbolicPerpendicularThroughPoint,
-  sphericalPerpendicularGreatCircleThroughPoint,
 } from "./spaceEngine";
 
 import "./App.css";
@@ -41,12 +37,15 @@ function screenToWorld(vp: any, p: Vec2): Vec2 {
 /* ---------------- Helpers ---------------- */
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const dist2 = (a: Vec2, b: Vec2) => {
-  const dx = a.x - b.x, dy = a.y - b.y;
+  const dx = a.x - b.x,
+    dy = a.y - b.y;
   return dx * dx + dy * dy;
 };
 function distPointToSegment(p: Vec2, a: Vec2, b: Vec2) {
-  const abx = b.x - a.x, aby = b.y - a.y;
-  const apx = p.x - a.x, apy = p.y - a.y;
+  const abx = b.x - a.x,
+    aby = b.y - a.y;
+  const apx = p.x - a.x,
+    apy = p.y - a.y;
   const ab2 = abx * abx + aby * aby;
   if (ab2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
   let t = (apx * abx + apy * aby) / ab2;
@@ -55,31 +54,283 @@ function distPointToSegment(p: Vec2, a: Vec2, b: Vec2) {
   return Math.hypot(p.x - q.x, p.y - q.y);
 }
 const euclidLen = (a: Vec2, b: Vec2) => Math.hypot(b.x - a.x, b.y - a.y);
+const dot2 = (a: Vec2, b: Vec2) => a.x * b.x + a.y * b.y;
+const norm2 = (a: Vec2) => Math.hypot(a.x, a.y) || 1;
+const normalize2 = (a: Vec2) => {
+  const n = norm2(a);
+  return { x: a.x / n, y: a.y / n };
+};
+const perp2 = (a: Vec2) => ({ x: -a.y, y: a.x });
+const cross2 = (a: Vec2, b: Vec2) => a.x * b.y - a.y * b.x;
 
-/* ---------- Exact distances (for “mesure à la main”) ---------- */
+function rotate2D(v: Vec2, deg: number) {
+  const t = (deg * Math.PI) / 180;
+  const c = Math.cos(t),
+    s = Math.sin(t);
+  return { x: v.x * c - v.y * s, y: v.x * s + v.y * c };
+}
+
+const angleBetweenDirs = (u: Vec2, v: Vec2) => {
+  const nu = Math.hypot(u.x, u.y) || 1;
+  const nv = Math.hypot(v.x, v.y) || 1;
+  const ux = u.x / nu, uy = u.y / nu;
+  const vx = v.x / nv, vy = v.y / nv;
+  const dot = clamp(ux * vx + uy * vy, -1, 1);
+  const crs = ux * vy - uy * vx;
+  return Math.atan2(Math.abs(crs), dot); // rad
+};
+
+function hyperbolicGeodesicCircleCenter(A: Vec2, B: Vec2): Vec2 | null {
+  // Cas dégénéré : A,B quasi alignés avec l'origine => géodésique = diamètre (droite)
+  const det = A.x * B.y - A.y * B.x;
+  if (Math.abs(det) < 1e-10) return null;
+
+  // Solve:
+  // A·c = (1+|A|^2)/2
+  // B·c = (1+|B|^2)/2
+  const aR = (1 + (A.x*A.x + A.y*A.y)) / 2;
+  const bR = (1 + (B.x*B.x + B.y*B.y)) / 2;
+
+  const cx = (aR * B.y - bR * A.y) / det;
+  const cy = (-aR * B.x + bR * A.x) / det;
+  return { x: cx, y: cy };
+}
+
+function hyperbolicTangentAtVertex(vertex: Vec2, other: Vec2): Vec2 {
+  // Tangente à la géodésique (vertex<->other) au point vertex
+  const c = hyperbolicGeodesicCircleCenter(vertex, other);
+  if (!c) {
+    // diamètre : géodésique = droite euclidienne, tangente = direction du segment
+    return { x: other.x - vertex.x, y: other.y - vertex.y };
+  }
+  // cercle orthogonal au bord : tangente ⟂ (vertex - centre)
+  const r = { x: vertex.x - c.x, y: vertex.y - c.y };
+  return { x: -r.y, y: r.x };
+}
+
+
+// --- Complex helpers for Poincaré disk (hyperbolic circles) ---
+type Cpx = { x: number; y: number };
+const cAdd = (a: Cpx, b: Cpx): Cpx => ({ x: a.x + b.x, y: a.y + b.y });
+const cSub = (a: Cpx, b: Cpx): Cpx => ({ x: a.x - b.x, y: a.y - b.y });
+const cMul = (a: Cpx, b: Cpx): Cpx => ({ x: a.x * b.x - a.y * b.y, y: a.x * b.y + a.y * b.x });
+const cConj = (a: Cpx): Cpx => ({ x: a.x, y: -a.y });
+const cAbs2 = (a: Cpx) => a.x * a.x + a.y * a.y;
+const cDiv = (a: Cpx, b: Cpx): Cpx => {
+  const d = cAbs2(b) || 1e-12;
+  const num = cMul(a, cConj(b));
+  return { x: num.x / d, y: num.y / d };
+};
+
+// Hyperbolic circle (geodesic radius R) in Poincaré disk, starting at user point P
+function buildHyperbolicCirclePath(center: Vec2, through: Vec2, R: number, samples = 720, overlapFrac = 0.06): Vec2[] {
+  const c: Cpx = center;
+  const p: Cpx = through;
+
+  // u = tanh(R/2) : radius in the "moved-to-origin" disk
+  const u = Math.tanh(R / 2);
+
+  // Möbius isometry φ_c(z) = (z - c) / (1 - conj(c) z)
+  // angle of w0 = φ_c(p) gives start direction for the param circle
+  const denom0 = cSub({ x: 1, y: 0 }, cMul(cConj(c), p));
+  const w0 = cDiv(cSub(p, c), denom0);
+  const theta0 = Math.atan2(w0.y, w0.x);
+
+  const total = 2 * Math.PI * (1 + overlapFrac);
+  const pts: Vec2[] = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const th = theta0 + (total * i) / samples;
+    const w: Cpx = { x: u * Math.cos(th), y: u * Math.sin(th) };
+
+    // inverse φ_c^{-1}(w) = (c + w) / (1 + conj(c) w)
+    const denom = cAdd({ x: 1, y: 0 }, cMul(cConj(c), w));
+    const z = cDiv(cAdd(c, w), denom);
+
+    // tiny numeric safety: keep inside disk
+    const r2 = z.x * z.x + z.y * z.y;
+    if (r2 >= 0.999999) {
+      const s = 0.999999 / Math.sqrt(r2);
+      pts.push({ x: z.x * s, y: z.y * s });
+    } else {
+      pts.push({ x: z.x, y: z.y });
+    }
+  }
+
+  // Force exact start at P to guarantee passing through the user point
+  pts[0] = through;
+  return pts;
+}
+
+
+
+/**
+ * Cercle sphérique géodésique complet (devant + derrière), avec z signé.
+ * Renvoie la projection (x,y) + le tableau z (même longueur).
+ * Le chemin commence en 'through2' et repasse légèrement sur le début via overlapFrac.
+ */
+function buildSphericalCirclePath3D(center2: Vec2, through2: Vec2, R: number, samples = 720, overlapFrac = 0.06) {
+  const c0 = normalize3v(liftSphereUpper(center2));
+  const p0 = normalize3v(liftSphereUpper(through2));
+
+  // direction u dans le plan tangent en c0 vers p0
+  const proj = dot3(p0, c0);
+  let u = { x: p0.x - proj * c0.x, y: p0.y - proj * c0.y, z: p0.z - proj * c0.z };
+  u = normalize3v(u);
+
+  // v orthonormal dans le plan tangent
+  let v = cross3(c0, u);
+  v = normalize3v(v);
+
+  const total = 2 * Math.PI * (1 + overlapFrac);
+  const xy: Vec2[] = [];
+  const z: number[] = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const th = (total * i) / samples;
+
+    const cosR = Math.cos(R), sinR = Math.sin(R);
+    const ct = Math.cos(th), st = Math.sin(th);
+
+    const q3 = {
+      x: cosR * c0.x + sinR * (ct * u.x + st * v.x),
+      y: cosR * c0.y + sinR * (ct * u.y + st * v.y),
+      z: cosR * c0.z + sinR * (ct * u.z + st * v.z),
+    };
+
+    xy.push({ x: q3.x, y: q3.y });
+    z.push(q3.z);
+  }
+
+  // départ exact sur le point utilisateur
+  xy[0] = through2;
+  z[0] = liftSphereUpper(through2).z;
+
+  return { xy, z };
+}
+
+
+
+/** Perpendiculaire sphérique à la droite (baseP,baseQ) passant par pointP : xy + z signé */
+
+
+function cross3(a: any, b: any) {
+  return { x: a.y*b.z - a.z*b.y, y: a.z*b.x - a.x*b.z, z: a.x*b.y - a.y*b.x };
+}
+function normalize3v(v: any) {
+  const n = norm3(v) || 1;
+  return { x: v.x/n, y: v.y/n, z: v.z/n };
+}
+
+/** Grande-cercle (droite sphérique) passant par A,B : renvoie xy + z signé */
+function buildSphericalGreatCirclePath3D(A2: Vec2, B2: Vec2, samples = 720, overlapFrac = 0.06) {
+  const A = normalize3v(liftSphereUpper(A2));
+  const B = normalize3v(liftSphereUpper(B2));
+
+  let n = cross3(A, B);
+  const nn = norm3(n);
+  if (nn < 1e-10) {
+    // A et B quasi identiques/antipodaux : fallback simple
+    n = { x: 0, y: 0, z: 1 };
+  } else {
+    n = normalize3v(n);
+  }
+
+  // base (u,v) dans le plan du grand cercle
+  let u = A; // A est déjà dans le plan
+  u = normalize3v(u);
+  let v = cross3(n, u);
+  v = normalize3v(v);
+
+  const total = 2 * Math.PI * (1 + overlapFrac);
+  const xy: Vec2[] = [];
+  const z: number[] = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const th = (total * i) / samples;
+    const q = {
+      x: Math.cos(th)*u.x + Math.sin(th)*v.x,
+      y: Math.cos(th)*u.y + Math.sin(th)*v.y,
+      z: Math.cos(th)*u.z + Math.sin(th)*v.z,
+    };
+    xy.push({ x: q.x, y: q.y });
+    z.push(q.z);
+  }
+
+  xy[0] = A2; // départ exact
+  return { xy, z };
+}
+
+/** Perpendiculaire sphérique à la droite (baseP,baseQ) passant par pointP */
+function buildSphericalPerpendicularGreatCirclePath3D(baseP: Vec2, baseQ: Vec2, pointP: Vec2, samples = 720, overlapFrac = 0.06) {
+  const A = normalize3v(liftSphereUpper(baseP));
+  const B = normalize3v(liftSphereUpper(baseQ));
+  const P = normalize3v(liftSphereUpper(pointP));
+
+  // normale du plan de la droite de base
+  let n0 = cross3(A, B);
+  n0 = normalize3v(n0);
+
+  // normale du plan perpendiculaire : orthogonale à n0 et à P
+  let n1 = cross3(n0, P);
+  const nn = norm3(n1);
+  if (nn < 1e-10) {
+    // point P aligné avec n0 -> cas dégénéré
+    n1 = cross3(P, { x: 1, y: 0, z: 0 });
+  }
+  n1 = normalize3v(n1);
+
+  // base (u,v) du grand cercle perpendiculaire, en partant de P
+  let u = P;
+  u = normalize3v(u);
+  let v = cross3(n1, u);
+  v = normalize3v(v);
+
+  const total = 2 * Math.PI * (1 + overlapFrac);
+  const xy: Vec2[] = [];
+  const z: number[] = [];
+
+  for (let i = 0; i <= samples; i++) {
+    const th = (total * i) / samples;
+    const q = {
+      x: Math.cos(th)*u.x + Math.sin(th)*v.x,
+      y: Math.cos(th)*u.y + Math.sin(th)*v.y,
+      z: Math.cos(th)*u.z + Math.sin(th)*v.z,
+    };
+    xy.push({ x: q.x, y: q.y });
+    z.push(q.z);
+  }
+
+  xy[0] = pointP;
+  return { xy, z };
+}
+
+
+/* ---------- Exact distances ---------- */
 function liftSphereUpper(p: Vec2) {
   const r2 = p.x * p.x + p.y * p.y;
   const z = Math.sqrt(Math.max(0, 1 - r2));
   return { x: p.x, y: p.y, z };
 }
-function dot3(a: any, b: any) { return a.x*b.x + a.y*b.y + a.z*b.z; }
-function norm3(a: any) { return Math.hypot(a.x, a.y, a.z); }
+function dot3(a: any, b: any) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+function norm3(a: any) {
+  return Math.hypot(a.x, a.y, a.z);
+}
 
 function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
-  if (space === "E") {
-    return euclidLen(A, B);
-  }
+  if (space === "E") return euclidLen(A, B);
   if (space === "H") {
     // hyperbolic distance in Poincaré disk (exact)
-    const a2 = A.x*A.x + A.y*A.y;
-    const b2 = B.x*B.x + B.y*B.y;
+    const a2 = A.x * A.x + A.y * A.y;
+    const b2 = B.x * B.x + B.y * B.y;
     const dx = A.x - B.x;
     const dy = A.y - B.y;
-    const d2 = dx*dx + dy*dy;
+    const d2 = dx * dx + dy * dy;
     const denom = (1 - a2) * (1 - b2);
     if (denom <= 0) return Infinity;
     const arg = 1 + (2 * d2) / denom;
-    // arcosh
     return Math.acosh(Math.max(1, arg));
   }
   // sphere: angle on unit sphere (exact)
@@ -93,18 +344,16 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
 
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
   if (space === "S") {
-    // exact spherical angle at B via tangents in tangent plane at B
+    // spherical angle at B via tangents in tangent plane at B
     const b3 = liftSphereUpper(B);
     const a3 = liftSphereUpper(A);
     const c3 = liftSphereUpper(C);
 
-    // tangent directions: project A and C onto tangent plane at B
     const projTangent = (p3: any) => {
-      // remove normal component along b3
       const k = dot3(p3, b3) / (dot3(b3, b3) || 1);
-      const t = { x: p3.x - k*b3.x, y: p3.y - k*b3.y, z: p3.z - k*b3.z };
+      const t = { x: p3.x - k * b3.x, y: p3.y - k * b3.y, z: p3.z - k * b3.z };
       const n = norm3(t) || 1;
-      return { x: t.x/n, y: t.y/n, z: t.z/n };
+      return { x: t.x / n, y: t.y / n, z: t.z / n };
     };
 
     const u = projTangent(a3);
@@ -113,39 +362,99 @@ function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
     return Math.acos(cos);
   }
 
-  // In Poincaré disk H: model is conformal => angles = Euclidean angles in the disk coordinates
-  // Euclid: same formula
+  if (space === "H") {
+    const t1 = hyperbolicTangentAtVertex(B, A);
+    const t2 = hyperbolicTangentAtVertex(B, C);
+    return angleBetweenDirs(t1, t2);
+  }
+
+  // Euclid:
   const u = { x: A.x - B.x, y: A.y - B.y };
   const v = { x: C.x - B.x, y: C.y - B.y };
-  const nu = Math.hypot(u.x, u.y) || 1;
-  const nv = Math.hypot(v.x, v.y) || 1;
-  const cos = clamp((u.x*v.x + u.y*v.y) / (nu*nv), -1, 1);
-  return Math.acos(cos);
+  return angleBetweenDirs(u, v);
 }
 
-/* ---------------- Modes ---------------- */
-type ToolMode = "NONE" | "PLACE_FIGURE_POINTS" | "PLACE_LINE_2PTS" | "MEASURE";
-type LineOpMode = "NONE" | "PARALLEL_0" | "PARALLEL_1" | "PERPENDICULAR";
-type HandMeasureMode = "NONE" | "HAND_DIST" | "HAND_ANGLE";
+function cloneAny<T>(x: T): T {
+  // @ts-ignore
+  if (typeof structuredClone === "function") return structuredClone(x);
+  return JSON.parse(JSON.stringify(x));
+}
 
-/* ---------------- Objects for selection ---------------- */
-type PickedSegment = {
-  kind: "segment";
-  owner: "engine" | "line";
+/* ---------------- Persistent objects ---------------- */
+type GeoPoint = { id: string; label: string; p: Vec2 };
+type SegmentMeta = {
   id: string;
+  A: string;
+  B: string;
   a: Vec2;
   b: Vec2;
+  poly: Vec2[];
 };
-type PickedLine = { kind: "line"; id: string };
-type PickedObject = PickedSegment | PickedLine;
+type CircleMeta = {
+  id: string;
+  center: GeoPoint;
+  point: GeoPoint;
+  radius: number;
+  poly: Vec2[];
+  z?: number[];   // <-- ajouté
+};
+type TriangleType = "ANY" | "ISOSCELES" | "EQUILATERAL" | "RIGHT";
+type TriangleMeta = {
+  id: string;
+  type: TriangleType;
+  A: GeoPoint;
+  B: GeoPoint;
+  C: GeoPoint;
+};
 
+
+/* ---------------- Stored lines (true geodesic lines) ---------------- */
 type LineObject = {
   id: string;
   pts: Vec2[];
   baseP: Vec2;
   baseQ: Vec2;
   space: SpaceId;
+  z?: number[]; // pour l'espace S : signe z (même longueur que pts)
 };
+
+type PointMode = "EXISTING" | "NEW";
+
+const FROG_QUOTES = [
+  "Déjà la fin de ma pause?",
+  "Hé je faisais une sieste !",
+  "Si tu insistes...",
+  "Dire que je voulais devenir Coâhsmonaute à la base...",
+  "Très bien, très bien",
+  "Et le mot magique?",
+  "C'est quoi mes horaires déjà?",
+  "Un métier pleins d'opportunités qu'ils disaient...",
+  "Ce sera tout?",
+  "On gaspille mes talents.",
+  "On aura tout vu..",
+  "C'est vraiment nécessaire?",
+  "Oui oui, ce sera fait",
+  "C'est pas vraiment un job pour un batracien ça",
+  "Pas besoin de répéter j'ai compris..",
+  "Regarde et admire!",
+  "Il n'y a pas meilleure grenouille dessinatrice que moi!",
+  "Que ferais-tu sans moi?",
+  "Admire ce travail!",
+  "Dire que j'ai quitté mon étang pour ça",
+  "Ce sera tout?",
+  "Je préviens ça fera des coûts supplémentaires.",
+  "Je suis payé combien pour faire ça déjà?",
+  "Encore?",
+  "On m'a déjà demandé ça aujourd'hui!",
+  "J'ai plus de potentiel que ça tu sais...",
+  "Bon ben au travail alors.",
+  "Ok, mais après je fais une pause.",
+  "Y a pas une convention collective pour ce job?",
+  "Je m'en occupe mais bien parce que c'est toi.",
+  "J'aurais pas dis mieux.",
+  "Bonne idée!",
+  "Intéressant...",
+];
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -156,56 +465,51 @@ export default function App() {
   const [renderState, setRenderState] = useState<EngineState>(() => stateRef.current);
 
   /* UI params */
-  const [moveDist, setMoveDist] = useState(0.3);
-  const [turnDeg, setTurnDeg] = useState(15);
-  const [segLen, setSegLen] = useState(1.0);
-  const [circleR, setCircleR] = useState(0.6);
   const [animSpeed, setAnimSpeed] = useState(0.9);
 
-  /* sphere degrees toggle */
+  /* sphere display toggle */
   const [sphereInDegrees, setSphereInDegrees] = useState(true);
-  const toSphereUnit = (v: number) => (sphereInDegrees ? (v * Math.PI) / 180 : v);
 
-  /* tool mode */
-  const [toolMode, setToolMode] = useState<ToolMode>("NONE");
+  /* Commands UI */
+  const [pointMode, setPointMode] = useState<PointMode>("NEW");
 
-  /* figure points */
-  const [figPts, setFigPts] = useState<Vec2[]>([]);
+  const [lineCmd, setLineCmd] = useState<"LINE_2PTS" | "PARALLEL" | "PERPENDICULAR">("LINE_2PTS");
 
-  /* line points */
-  const [linePts, setLinePts] = useState<Vec2[]>([]);
+  const [figureCmd, setFigureCmd] = useState<"TRIANGLE" | "CIRCLE">("TRIANGLE");
+  const [triangleType, setTriangleType] = useState<TriangleType>("ANY");
 
-  /* stored lines (true geodesic lines) */
+  const [segmentCmd, setSegmentCmd] = useState<"SEGMENT" | "SPECIAL" | "MIDPOINT">("SEGMENT");
+  const [segmentSpecial, setSegmentSpecial] = useState<"ALTITUDE" | "RADIUS" | "DIAMETER">("RADIUS");
+  const [showLengths, setShowLengths] = useState(false);
+
+  const [angleDeg, setAngleDeg] = useState(60);
+  const [showAngles, setShowAngles] = useState(false);
+
+  /* HUD */
+  const [hudText, setHudText] = useState<string>("");
+
+  /* Frog speech bubble */
+  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
+  const frogSpeechTimerRef = useRef<number | null>(null);
+
+  /* persistent constructions */
+  const [points, setPoints] = useState<GeoPoint[]>([]);
   const [lines, setLines] = useState<LineObject[]>([]);
+  const [segments, setSegments] = useState<SegmentMeta[]>([]);
+  const [circles, setCircles] = useState<CircleMeta[]>([]);
+  const [triangles, setTriangles] = useState<TriangleMeta[]>([]);
 
-  /* measure mode state */
-  const [hovered, setHovered] = useState<PickedObject | null>(null);
-  const [selected, setSelected] = useState<PickedObject[]>([]);
-  const [measurePanelText, setMeasurePanelText] = useState<string>("MODE MESURE : inactif\n");
+  const pointsRef = useRef<GeoPoint[]>([]);
+  const linesRef = useRef<LineObject[]>([]);
+  const segmentsRef = useRef<SegmentMeta[]>([]);
+  const circlesRef = useRef<CircleMeta[]>([]);
+  const trianglesRef = useRef<TriangleMeta[]>([]);
 
-  /* angle visualization */
-  const angleHintRef = useRef<{
-    vertex: Vec2;
-    v1: Vec2;
-    v2: Vec2;
-    isObtuse: boolean;
-  } | null>(null);
-
-  /* magic reveal (for line drawing) */
-  const magicLineRef = useRef<{
-    active: boolean;
-    pts: Vec2[];
-    t: number;
-    finalLine?: LineObject;
-  } | null>(null);
-
-  /* two-step line operations (parallel/perp) */
-  const [lineOpMode, setLineOpMode] = useState<LineOpMode>("NONE");
-  const [opPoint, setOpPoint] = useState<Vec2 | null>(null); // (f) point shown for ops
-
-  /* hand measurement mode */
-  const [handMode, setHandMode] = useState<HandMeasureMode>("NONE");
-  const [handPts, setHandPts] = useState<Vec2[]>([]); // (f) show clicked points
+  useEffect(() => void (pointsRef.current = points), [points]);
+  useEffect(() => void (linesRef.current = lines), [lines]);
+  useEffect(() => void (segmentsRef.current = segments), [segments]);
+  useEffect(() => void (circlesRef.current = circles), [circles]);
+  useEffect(() => void (trianglesRef.current = triangles), [triangles]);
 
   const formula = useMemo(() => spaceFormula(space), [space]);
 
@@ -215,43 +519,122 @@ export default function App() {
     return true;
   };
 
+  const formatDistance = (d: number) => {
+    if (!isFinite(d)) return "∞";
+    if (space === "S") {
+      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
+      return `${d.toFixed(3)} rad`;
+    }
+    return `${d.toFixed(2)} cm`;
+  };
+
+  const speakThen = (fn: () => void) => {
+    if (stateRef.current.anim.active) return;
+    const txt = FROG_QUOTES[Math.floor(Math.random() * FROG_QUOTES.length)];
+    setFrogSpeech(txt);
+    if (frogSpeechTimerRef.current) window.clearTimeout(frogSpeechTimerRef.current);
+    frogSpeechTimerRef.current = window.setTimeout(() => setFrogSpeech(null), 1300);
+
+    window.setTimeout(() => {
+      // start after frog "speaks"
+      fn();
+    }, 950);
+  };
+
   /* (c) Correct cursor mapping under CSS scaling */
   const eventToWorld = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current!;
     const rect = canvas.getBoundingClientRect();
-
-    // scale from CSS pixels -> canvas pixels
     const sx = canvas.width / rect.width;
     const sy = canvas.height / rect.height;
-
     const px = (e.clientX - rect.left) * sx;
     const py = (e.clientY - rect.top) * sy;
-
     const vp = makeViewport(canvas.width, canvas.height, 1.25);
     const w = screenToWorld(vp, { x: px, y: py });
     return { w, vp };
   };
 
-  /* reset on space change */
+  /* ---------------- History (undo) ---------------- */
+  type Snapshot = {
+    engine: EngineState;
+    points: GeoPoint[];
+    lines: LineObject[];
+    segments: SegmentMeta[];
+    circles: CircleMeta[];
+    triangles: TriangleMeta[];
+  };
+  const historyRef = useRef<Snapshot[]>([]);
+
+  const pushSnapshot = (override?: Partial<Snapshot>) => {
+    const snap: Snapshot = {
+      engine: cloneAny(stateRef.current),
+      points: cloneAny(pointsRef.current),
+      lines: cloneAny(linesRef.current),
+      segments: cloneAny(segmentsRef.current),
+      circles: cloneAny(circlesRef.current),
+      triangles: cloneAny(trianglesRef.current),
+      ...override,
+    };
+    historyRef.current = [...historyRef.current, snap];
+  };
+
+  const restoreSnapshot = (snap: Snapshot) => {
+    stateRef.current = cloneAny(snap.engine);
+    setRenderState(stateRef.current);
+    setPoints(cloneAny(snap.points));
+    setLines(cloneAny(snap.lines));
+    setSegments(cloneAny(snap.segments));
+    setCircles(cloneAny(snap.circles));
+    setTriangles(cloneAny(snap.triangles));
+    setHudText("");
+  };
+
+  const undoLast = () => {
+    const h = historyRef.current;
+    if (h.length <= 1) return;
+    const next = h.slice(0, h.length - 1);
+    historyRef.current = next;
+    restoreSnapshot(next[next.length - 1]);
+  };
+
+  const clearAll = () => {
+    if (stateRef.current.anim.active) return;
+    stateRef.current = clearShapes(stateRef.current);
+    setRenderState(stateRef.current);
+    setPoints([]);
+    setLines([]);
+    setSegments([]);
+    setCircles([]);
+    setTriangles([]);
+    setHudText("");
+    historyRef.current = [];
+    pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
+  };
+
+  /* ---------------- Reset on space change ---------------- */
   useEffect(() => {
     stateRef.current = reset(stateRef.current, space);
     setRenderState(stateRef.current);
-    setToolMode("NONE");
-    setLineOpMode("NONE");
-    setHandMode("NONE");
-    setHandPts([]);
-    setOpPoint(null);
-    setFigPts([]);
-    setLinePts([]);
-    setHovered(null);
-    setSelected([]);
-    setMeasurePanelText("MODE MESURE : inactif\n");
-    angleHintRef.current = null;
-    magicLineRef.current = null;
+    setHudText("");
+
+    setPoints([]);
     setLines([]);
+    setSegments([]);
+    setCircles([]);
+    setTriangles([]);
+
+    historyRef.current = [];
+    pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
   }, [space]);
 
-  /* main loop */
+  /* ---------------- Main loop ---------------- */
+  const magicLineRef = useRef<{
+    active: boolean;
+    pts: Vec2[];
+    t: number;
+    finalLine?: LineObject;
+  } | null>(null);
+
   useEffect(() => {
     let raf = 0;
     let last = performance.now();
@@ -269,7 +652,14 @@ export default function App() {
         ml.t = clamp(ml.t + dt / 0.45, 0, 1);
         if (ml.t >= 1) {
           ml.active = false;
-          if (ml.finalLine) setLines((prev) => [...prev, ml.finalLine!]);
+          if (ml.finalLine) {
+            setLines((prev) => {
+              const next = [...prev, ml.finalLine!];
+              // snapshot after commit
+              pushSnapshot({ lines: cloneAny(next) });
+              return next;
+            });
+          }
         }
       }
 
@@ -281,261 +671,863 @@ export default function App() {
     return () => cancelAnimationFrame(raf);
   }, []);
 
-  /* ---------- Picking ---------- */
-  const pickObjectAt = (w: Vec2): PickedObject | null => {
-    const SEG_THR = 0.035;
+  /* ---------------- Points ---------------- */
+  const pointLabelCounterRef = useRef(0);
+  const nextPointLabel = () => {
+    const n = pointLabelCounterRef.current++;
+    const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (n < 26) return letters[n];
+    const base = letters[n % 26];
+    const k = Math.floor(n / 26);
+    return `${base}${k}`;
+  };
 
-    // lines (custom)
-    let bestLine: { id: string; d: number } | null = null;
-    for (const L of lines) {
+  const pickPointAt = (w: Vec2) => {
+    const thr2 = 0.0025; // ~0.05^2
+    let best: { p: GeoPoint; d2: number } | null = null;
+    for (const P of pointsRef.current) {
+      const d = dist2(P.p, w);
+      if (d < thr2 && (!best || d < best.d2)) best = { p: P, d2: d };
+    }
+    return best?.p ?? null;
+  };
+
+  const createPoint = (p: Vec2) => {
+    const pt: GeoPoint = { id: `P_${Date.now()}_${Math.random()}`, label: nextPointLabel(), p };
+    setPoints((prev) => [...prev, pt]);
+    return pt;
+  };
+
+  const getOrCreatePoint = (w: Vec2, allowCreate: boolean) => {
+    const picked = pickPointAt(w);
+    if (picked) return picked;
+    if (!allowCreate) return null;
+    return createPoint(w);
+  };
+
+  /* ---------------- Point input session ---------------- */
+  type PointSession = {
+    needed: number;
+    allowCreate: boolean;
+    collected: GeoPoint[];
+    createdIds: Set<string>;
+    onDone: (pts: GeoPoint[], createdIds: Set<string>) => void;
+  };
+  const pointSessionRef = useRef<PointSession | null>(null);
+  const [isPointInput, setIsPointInput] = useState(false);
+
+  const startPointSession = (needed: number, allowCreate: boolean, hud: string, onDone: PointSession["onDone"]) => {
+    if (stateRef.current.anim.active) return;
+    pointSessionRef.current = { needed, allowCreate, collected: [], createdIds: new Set(), onDone };
+    setIsPointInput(true);
+    setHudText(hud);
+  };
+  const stopPointSession = () => {
+    pointSessionRef.current = null;
+    setIsPointInput(false);
+    setHudText("");
+  };
+
+  /* ---------------- Line operation session ---------------- */
+  type LineOp = "PARALLEL" | "PERPENDICULAR";
+  type LineOpSession = {
+    op: LineOp;
+    step: 1 | 2;
+    allowCreate: boolean;
+    baseLine: LineObject | null;
+  };
+  const [lineOpSession, setLineOpSession] = useState<LineOpSession | null>(null);
+
+  const pickLineAt = (w: Vec2) => {
+    const thr = 0.035;
+    let best: { line: LineObject; d: number } | null = null;
+    for (const L of linesRef.current) {
       const pts = L.pts;
       for (let i = 0; i < pts.length - 1; i++) {
         const d = distPointToSegment(w, pts[i], pts[i + 1]);
-        if (d < SEG_THR && (!bestLine || d < bestLine.d)) {
-          bestLine = { id: L.id, d };
-        }
+        if (d < thr && (!best || d < best.d)) best = { line: L, d };
       }
     }
-    if (bestLine) return { kind: "line", id: bestLine.id };
+    return best?.line ?? null;
+  };
 
-    // engine shapes (segment picking)
-    const shapes: any[] = renderState.shapes as any[];
-    let bestSeg: { id: string; a: Vec2; b: Vec2; d: number } | null = null;
+  /* ---------------- Segment picking (for midpoint split) ---------------- */
+  const pickSegmentMetaAt = (w: Vec2) => {
+    const thr = 0.035;
+    let best: { seg: SegmentMeta; d: number } | null = null;
 
-    for (let si = 0; si < shapes.length; si++) {
-      const sh = shapes[si];
-      if (sh.kind !== "polyline") continue;
-      const pts: Vec2[] = sh.pts;
+    for (const S of segmentsRef.current) {
+      const pts = S.poly;
       for (let i = 0; i < pts.length - 1; i++) {
-        const a = pts[i], b = pts[i + 1];
-        const d = distPointToSegment(w, a, b);
-        if (d < SEG_THR && (!bestSeg || d < bestSeg.d)) {
-          bestSeg = { id: `engine:${si}:${i}`, a, b, d };
-        }
+        const d = distPointToSegment(w, pts[i], pts[i + 1]);
+        if (d < thr && (!best || d < best.d)) best = { seg: S, d };
       }
     }
-    if (bestSeg) {
-      return { kind: "segment", owner: "engine", id: bestSeg.id, a: bestSeg.a, b: bestSeg.b };
-    }
-
-    return null;
+    return best?.seg ?? null;
   };
 
-  const selectedLine = (() => {
-    const l = selected.find((s) => s.kind === "line") as PickedLine | undefined;
-    if (!l) return null;
-    return lines.find((x) => x.id === l.id) || null;
-  })();
+  /* ---------------- Drawing helpers (actions) ---------------- */
+  const traceSingleGeodesic = (a: Vec2, b: Vec2, onDone: () => void) => {
+    const frog = frogWorldPos(stateRef.current);
+    // Move to start without trace
+    stateRef.current = animatePath(stateRef.current, [frog, a], animSpeed, false);
 
-  const ensureMeasureMode = (msg?: string) => {
-    if (toolMode !== "MEASURE") {
-      setToolMode("MEASURE");
-      setHovered(null);
-      setSelected([]);
-      angleHintRef.current = null;
-    }
-    if (msg) setMeasurePanelText(msg);
+    const path = geodesicBetween(space, a, b, 260);
+
+    const timer = window.setInterval(() => {
+      if (stateRef.current.anim.active) return;
+
+      // IMPORTANT: on ne doit démarrer le tracé qu'une seule fois
+      window.clearInterval(timer);
+
+      stateRef.current = startTracing(stateRef.current, "#0f172a", 3);
+      stateRef.current = animatePath(stateRef.current, path, animSpeed, true);
+
+      const t2 = window.setInterval(() => {
+        if (stateRef.current.anim.active) return;
+        window.clearInterval(t2);
+        stateRef.current = finishTracing(stateRef.current);
+        setRenderState(stateRef.current);
+        onDone();
+      }, 25);
+    }, 25);
   };
 
-  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (toolMode !== "MEASURE") return;
-    const { w } = eventToWorld(e);
-    if (!isValidWorldPoint(w)) {
-      setHovered(null);
-      return;
-    }
-    setHovered(pickObjectAt(w));
+  const tracePolylineClosed = (pts: Vec2[], onDone: () => void) => {
+    if (pts.length < 2) return;
+    const frog = frogWorldPos(stateRef.current);
+    stateRef.current = animatePath(stateRef.current, [frog, pts[0]], animSpeed, false);
+
+    const closed = [...pts, pts[0]];
+    let phase: "MOVE" | "TRACE" = "MOVE";
+    let i = 0;
+
+    const timer = window.setInterval(() => {
+      if (stateRef.current.anim.active) return;
+
+      if (phase === "MOVE") {
+        stateRef.current = startTracing(stateRef.current, "#0f172a", 3);
+        phase = "TRACE";
+      }
+
+      if (i >= closed.length - 1) {
+        stateRef.current = finishTracing(stateRef.current);
+        setRenderState(stateRef.current);
+        window.clearInterval(timer);
+        onDone();
+        return;
+      }
+
+      const a = closed[i];
+      const b = closed[i + 1];
+      const path = geodesicBetween(space, a, b, 260);
+      stateRef.current = animatePath(stateRef.current, path, animSpeed, true);
+      i++;
+    }, 25);
   };
 
+  const createSegmentMeta = (A: GeoPoint, B: GeoPoint, poly: Vec2[]) => {
+    const id = `S_${Date.now()}_${Math.random()}`;
+    const meta: SegmentMeta = { id, A: A.label, B: B.label, a: A.p, b: B.p, poly };
+    setSegments((prev) => [...prev, meta]);
+    return meta;
+  };
+
+  const createTriangleMeta = (type: TriangleType, A: GeoPoint, B: GeoPoint, C: GeoPoint) => {
+    const t: TriangleMeta = { id: `T_${Date.now()}_${Math.random()}`, type, A, B, C };
+    setTriangles((prev) => [...prev, t]);
+    return t;
+  };
+
+  const createCircleMeta = (
+    center: GeoPoint,
+    point: GeoPoint,
+    radius: number,
+    poly: Vec2[],
+    z?: number[]
+  ) => {
+    const c: CircleMeta = { id: `C_${Date.now()}_${Math.random()}`, center, point, radius, poly, z };
+    setCircles((prev) => [...prev, c]);
+    return c;
+  };
+
+  /* ---------------- On canvas click ---------------- */
   const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const { w } = eventToWorld(e);
     if (!isValidWorldPoint(w)) return;
 
-    /* ----- Hand measures (d,f) ----- */
-    if (toolMode === "MEASURE" && handMode !== "NONE") {
-      setHandPts((prev) => {
-        const next = [...prev, w];
+    // Point input session
+    if (isPointInput && pointSessionRef.current) {
+      const sess = pointSessionRef.current;
+      const picked = pickPointAt(w);
+      let pt: GeoPoint | null = picked;
 
-        if (handMode === "HAND_DIST" && next.length === 2) {
-          const d = distanceExact(space, next[0], next[1]); // distance géodésique intrinsèque
+      if (!pt) {
+        if (!sess.allowCreate) return;
+        pt = createPoint(w);
+        sess.createdIds.add(pt.id);
+      }
 
-          if (space === "S") {
-            const deg = (d * 180) / Math.PI;
-            setMeasurePanelText(
-              `MESURE DE DISTANCE À LA MAIN\n` +
-              `A=${JSON.stringify(next[0])}\n` +
-              `B=${JSON.stringify(next[1])}\n` +
-              `d_geo = ${d.toFixed(6)} rad  (= ${deg.toFixed(3)}°)\n`
-            );
-          } else if (space === "H") {
-            setMeasurePanelText(
-              `MESURE DE DISTANCE À LA MAIN\n` +
-              `A=${JSON.stringify(next[0])}\n` +
-              `B=${JSON.stringify(next[1])}\n` +
-              `d_geo = ${d.toFixed(6)}\n`
-            );
-          } else {
-            setMeasurePanelText(
-              `MESURE DE DISTANCE À LA MAIN\n` +
-              `A=${JSON.stringify(next[0])}\n` +
-              `B=${JSON.stringify(next[1])}\n` +
-              `d_geo = ${d.toFixed(6)}\n`
-            );
-          }
+      if (sess.collected.some((x) => x.id === pt!.id)) return;
+      sess.collected.push(pt);
 
-          setHandMode("NONE");
-        }
+      setHudText(`${sess.collected.length}/${sess.needed} point(s) sélectionné(s)`);
 
-
-        if (handMode === "HAND_ANGLE" && next.length === 3) {
-          const ang = angleHand(space, next[0], next[1], next[2]); // angle at B=next[1]
-          const deg = (ang * 180) / Math.PI;
-
-          const u = { x: next[0].x - next[1].x, y: next[0].y - next[1].y };
-          const v = { x: next[2].x - next[1].x, y: next[2].y - next[1].y };
-          const nu = Math.hypot(u.x, u.y) || 1;
-          const nv = Math.hypot(v.x, v.y) || 1;
-          const v1 = { x: u.x / nu, y: u.y / nu };
-          const v2 = { x: v.x / nv, y: v.y / nv };
-          const isObtuse = deg > 90;
-          angleHintRef.current = { vertex: next[1], v1, v2, isObtuse };
-
-          setMeasurePanelText(
-            `MESURE À LA MAIN : angle au sommet (B)\nA=${JSON.stringify(next[0])}\nB=${JSON.stringify(next[1])}\nC=${JSON.stringify(next[2])}\nAngle ABC = ${deg.toFixed(3)}° (${isObtuse ? "obtus" : "aigu"})\n`
-          );
-          setHandMode("NONE");
-        }
-
-        return next.slice(0, handMode === "HAND_DIST" ? 2 : 3);
-      });
+      if (sess.collected.length >= sess.needed) {
+        const pts = [...sess.collected];
+        const created = new Set(sess.createdIds);
+        const cb = sess.onDone;
+        stopPointSession();
+        cb(pts, created);
+      }
       return;
     }
 
-    /* ----- Two-step line operation (parallel/perp) (f) ----- */
-    if (lineOpMode !== "NONE") {
-      // step 1: select a line
-      const obj = pickObjectAt(w);
-      if (obj && obj.kind === "line") {
-        setSelected([{ kind: "line", id: obj.id }]);
-        setMeasurePanelText(
-          "ÉTAPE 2 : clique un point sur l’espace.\nLa grenouille créera la droite.\n"
-        );
+    // Line operation session (parallel/perp)
+    if (lineOpSession) {
+      if (lineOpSession.step === 1) {
+        const L = pickLineAt(w);
+        if (!L) return;
+        setLineOpSession({ ...lineOpSession, step: 2, baseLine: L });
+        setHudText("Étape 2 : clique un point (ou un point existant).");
         return;
       }
 
-      // step 2: click a point
-      const base = selectedLine;
-      if (!base) {
-        setMeasurePanelText("ÉTAPE 1 : sélectionne d’abord une droite.\n");
-        return;
-      }
+      const base = lineOpSession.baseLine;
+      if (!base) return;
 
-      setOpPoint(w); // show op point (f)
+      const P = getOrCreatePoint(w, lineOpSession.allowCreate);
+      if (!P) return;
 
-      // move frog to point (no trace) then invoke line with magic reveal
-      const frog = frogWorldPos(stateRef.current);
-      stateRef.current = animatePath(stateRef.current, [frog, w], animSpeed, false);
+      speakThen(() => {
+        const target = P.p;
+        const frog = frogWorldPos(stateRef.current);
+        stateRef.current = animatePath(stateRef.current, [frog, target], animSpeed, false);
 
-      const timer = window.setInterval(() => {
-        if (stateRef.current.anim.active) return;
+        const timer = window.setInterval(() => {
+          if (stateRef.current.anim.active) return;
 
-        // Build result polyline
-        let pts: Vec2[] = [];
-        if (space === "E") {
-          // Euclid op: directly store (no special curved polyline)
-          const d = { x: base.baseQ.x - base.baseP.x, y: base.baseQ.y - base.baseP.y };
-          const L = Math.hypot(d.x, d.y) || 1;
-          const u = { x: d.x / L, y: d.y / L };
+          let pts: Vec2[] = [];
+          let zLine: number[] | undefined = undefined;
+          if (space === "E") {
+            const d = { x: base.baseQ.x - base.baseP.x, y: base.baseQ.y - base.baseP.y };
+            const u = normalize2(d);
 
-          if (lineOpMode === "PERPENDICULAR") {
-            const perp = { x: -u.y, y: u.x };
-            const big = 5;
-            pts = [
-              { x: w.x - perp.x * big, y: w.y - perp.y * big },
-              { x: w.x + perp.x * big, y: w.y + perp.y * big },
-            ];
+            if (lineOpSession.op === "PERPENDICULAR") {
+              const n = perp2(u);
+              const big = 5;
+              pts = [
+                { x: target.x - n.x * big, y: target.y - n.y * big },
+                { x: target.x + n.x * big, y: target.y + n.y * big },
+              ];
+            } else {
+              const big = 5;
+              pts = [
+                { x: target.x - u.x * big, y: target.y - u.y * big },
+                { x: target.x + u.x * big, y: target.y + u.y * big },
+              ];
+            }
+          } else if (space === "H") {
+            if (lineOpSession.op === "PERPENDICULAR") {
+              pts = hyperbolicPerpendicularThroughPoint(base.baseP, base.baseQ, target, 560);
+            } else {
+              pts = hyperbolicParallelThroughPoint(base.baseP, base.baseQ, target, 0, 560);
+            }
           } else {
-            const big = 5;
-            pts = [
-              { x: w.x - u.x * big, y: w.y - u.y * big },
-              { x: w.x + u.x * big, y: w.y + u.y * big },
-            ];
+            if (lineOpSession.op === "PERPENDICULAR") {
+              const out = buildSphericalPerpendicularGreatCirclePath3D(base.baseP, base.baseQ, target, 720, 0.06);
+              pts = out.xy;
+              zLine = out.z;
+            } else {
+              // Not supported on sphere in this version
+              setHudText("Parallèle non disponible dans l’espace C.");
+              setLineOpSession(null);
+              window.clearInterval(timer);
+              return;
+            }
           }
-        } else if (space === "H") {
-          if (lineOpMode === "PERPENDICULAR") {
-            pts = hyperbolicPerpendicularThroughPoint(base.baseP, base.baseQ, w, 560);
-          } else {
-            const which: 0 | 1 = lineOpMode === "PARALLEL_0" ? 0 : 1;
-            pts = hyperbolicParallelThroughPoint(base.baseP, base.baseQ, w, which, 560);
-          }
-        } else if (space === "S") {
-          if (lineOpMode === "PERPENDICULAR") {
-            pts = sphericalPerpendicularGreatCircleThroughPoint(base.baseP, base.baseQ, w, 560);
-          } else {
-            setMeasurePanelText(
-              "OPÉRATION IMPOSSIBLE À L'ENDROIT INDIQUÉ\n"
-            );
-            setLineOpMode("NONE");
+
+          if (pts.length < 2) {
+            setHudText("Opération impossible à l’endroit indiqué.");
+            setLineOpSession(null);
             window.clearInterval(timer);
             return;
           }
-        }
 
-        if (pts.length < 2) {
-          setMeasurePanelText("OPÉRATION IMPOSSIBLE À L'ENDROIT INDIQUÉ\n");
-          setLineOpMode("NONE");
+          const id = `Op_${Date.now()}`;
+          magicLineRef.current = {
+            active: true,
+            pts,
+            t: 0,
+            finalLine: { id, pts, baseP: pts[0], baseQ: pts[pts.length - 1], space, z: zLine },
+          };
+
+          setLineOpSession(null);
+          setHudText("");
           window.clearInterval(timer);
-          return;
-        }
-
-        const id = `Op_${Date.now()}`;
-        magicLineRef.current = {
-          active: true,
-          pts,
-          t: 0,
-          finalLine: { id, pts, baseP: pts[0], baseQ: pts[pts.length - 1], space },
-        };
-
-        setMeasurePanelText("OPÉRATION TERMINÉE : droite créée.\n");
-        setLineOpMode("NONE");
-        window.clearInterval(timer);
-      }, 25);
+        }, 25);
+      });
 
       return;
     }
 
-    /* ----- Measure selection mode ----- */
-    if (toolMode === "MEASURE") {
-      const obj = pickObjectAt(w);
-      if (!obj) return;
+    // Segment midpoint split picking
+    if (segmentCmd === "MIDPOINT" && hudText.startsWith("Clique un segment")) {
+      const S = pickSegmentMetaAt(w);
+      if (!S) return;
 
-      setSelected((prev) => {
-        const key = JSON.stringify(obj);
-        const exists = prev.some((x) => JSON.stringify(x) === key);
-        let next = exists ? prev.filter((x) => JSON.stringify(x) !== key) : [...prev, obj];
-        if (next.length > 2) next = next.slice(next.length - 2);
-        return next;
+      // Create midpoint
+      const mid = { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      if (!isValidWorldPoint(mid)) return;
+
+      const M = createPoint(mid);
+
+      // Replace meta by two metas (labels may overlap, but it matches "scinder")
+      const A = pointsRef.current.find((p) => p.label === S.A);
+      const B = pointsRef.current.find((p) => p.label === S.B);
+      if (A && B) {
+        const poly1 = geodesicBetween(space, A.p, M.p, 160);
+        const poly2 = geodesicBetween(space, M.p, B.p, 160);
+        setSegments((prev) => {
+          const without = prev.filter((x) => x.id !== S.id);
+          const s1: SegmentMeta = { id: `S_${Date.now()}_${Math.random()}`, A: A.label, B: M.label, a: A.p, b: M.p, poly: poly1 };
+          const s2: SegmentMeta = { id: `S_${Date.now()}_${Math.random()}`, A: M.label, B: B.label, a: M.p, b: B.p, poly: poly2 };
+          const next = [...without, s1, s2];
+          return next;
+        });
+      }
+
+      pushSnapshot();
+      setHudText("");
+      return;
+    }
+  };
+
+  /* ---------------- Actions triggered by UI ---------------- */
+  const validateLines = () => {
+    const allowCreate = pointMode === "NEW";
+
+    if (lineCmd === "LINE_2PTS") {
+      startPointSession(2, allowCreate, "Droite : sélectionne 2 points.", (pts) => {
+        speakThen(() => {
+          const [A, B] = pts;
+          const mid = { x: (A.p.x + B.p.x) / 2, y: (A.p.y + B.p.y) / 2 };
+          const frog = frogWorldPos(stateRef.current);
+          stateRef.current = animatePath(stateRef.current, [frog, mid], animSpeed, false);
+
+          const timer = window.setInterval(() => {
+            if (stateRef.current.anim.active) return;
+
+            let poly: Vec2[] = [];
+            let zLine: number[] | undefined = undefined;
+
+            if (space === "S") {
+              const out = buildSphericalGreatCirclePath3D(A.p, B.p, 720, 0.06);
+              poly = out.xy;
+              zLine = out.z;
+            } else {
+              poly = geodesicLineThrough(space, A.p, B.p, 720);
+            }
+            const id = `L_${Date.now()}`;
+            magicLineRef.current = {
+              active: true,
+              pts: poly,
+              t: 0,
+              finalLine: { id, pts: poly, baseP: A.p, baseQ: B.p, space, z: zLine },
+            };
+
+            window.clearInterval(timer);
+          }, 25);
+        });
       });
       return;
     }
 
-    /* ----- Figure point placement ----- */
-    if (toolMode === "PLACE_FIGURE_POINTS") {
-      setFigPts((prev) => [...prev, w]);
+    // Parallel / perpendicular
+    const op: LineOp = lineCmd === "PARALLEL" ? "PARALLEL" : "PERPENDICULAR";
+    setLineOpSession({ op, step: 1, allowCreate, baseLine: null });
+    setHudText("Étape 1 : clique une droite existante.");
+  };
+
+  const applyTriangleType = (type: TriangleType, A: GeoPoint, B: GeoPoint, C: GeoPoint, createdIds: Set<string>) => {
+    // Only move C if it was created during this command (to avoid moving an existing point unexpectedly)
+    const canMoveC = createdIds.has(C.id);
+    if (!canMoveC) return C;
+
+    const a = A.p,
+      b = B.p,
+      c0 = C.p;
+
+    let c = c0;
+
+    if (type === "ISOSCELES") {
+      // project onto perpendicular bisector of AB (Euclidean in model coords)
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const d = { x: b.x - a.x, y: b.y - a.y };
+      const n = perp2(d);
+      const nn = dot2(n, n) || 1;
+      const t = dot2({ x: c0.x - mid.x, y: c0.y - mid.y }, n) / nn;
+      c = { x: mid.x + n.x * t, y: mid.y + n.y * t };
+    } else if (type === "EQUILATERAL") {
+      const ab = { x: b.x - a.x, y: b.y - a.y };
+      const c1 = { x: a.x + rotate2D(ab, 60).x, y: a.y + rotate2D(ab, 60).y };
+      const c2 = { x: a.x + rotate2D(ab, -60).x, y: a.y + rotate2D(ab, -60).y };
+      // choose side based on click (c0)
+      const side = Math.sign(cross2(ab, { x: c0.x - a.x, y: c0.y - a.y })) || 1;
+      c = side >= 0 ? c1 : c2;
+      if (!isValidWorldPoint(c)) c = side >= 0 ? c2 : c1;
+    } else if (type === "RIGHT") {
+      if (space === "E") {
+        // --- ton ancien code euclidien (Thalès) ---
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        const r = euclidLen(a, b) / 2;
+        const dir = normalize2({ x: c0.x - mid.x, y: c0.y - mid.y });
+        c = { x: mid.x + dir.x * r, y: mid.y + dir.y * r };
+      } else {
+        // --- H ou S : on ajuste C pour que l'angle A C B = 90° (intrinsèque) ---
+        const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+
+        let dir = { x: c0.x - mid.x, y: c0.y - mid.y };
+        const nd = Math.hypot(dir.x, dir.y);
+        if (nd < 1e-8) {
+          // si l'utilisateur clique pile sur le milieu, on prend une direction perpendiculaire à AB
+          const ab = { x: b.x - a.x, y: b.y - a.y };
+          dir = perp2(ab);
+        }
+        dir = normalize2(dir);
+
+        // borne max t pour rester dans le domaine (disque / hémisphère)
+        const r2max = space === "H" ? 0.9995 : 1.0; // marge sécurité en H
+        const mm = mid.x * mid.x + mid.y * mid.y;
+        const md = mid.x * dir.x + mid.y * dir.y;
+        const disc = md * md + (r2max - mm);
+        if (disc <= 0) return C; // pas de place
+
+        const tMax = Math.max(0.001, -md + Math.sqrt(disc));
+
+        const f = (t: number) => {
+          const Ct = { x: mid.x + dir.x * t, y: mid.y + dir.y * t };
+          if (!isValidWorldPoint(Ct)) return NaN;
+          // angle au sommet C : angleHand calcule l'angle au 2e argument
+          const ang = angleHand(space, a, Ct, b);
+          return ang - Math.PI / 2;
+        };
+
+        // on cherche un intervalle [lo,hi] où f change de signe
+        let lo = 0.001;
+        let hi = tMax;
+        let flo = f(lo);
+        let fhi = f(hi);
+
+        // si pas de changement de signe, on échantillonne pour trouver un bracket
+        if (!isFinite(flo) || !isFinite(fhi) || flo * fhi > 0) {
+          let found = false;
+          const N = 40;
+          let prevT = lo;
+          let prevF = flo;
+          for (let i = 1; i <= N; i++) {
+            const t = lo + ((hi - lo) * i) / N;
+            const ft = f(t);
+            if (isFinite(prevF) && isFinite(ft) && prevF * ft <= 0) {
+              lo = prevT; flo = prevF;
+              hi = t;     fhi = ft;
+              found = true;
+              break;
+            }
+            prevT = t;
+            prevF = ft;
+          }
+          if (!found) {
+            // fallback : on garde le point euclidien "à peu près"
+            const guess = { x: mid.x + dir.x * (tMax * 0.6), y: mid.y + dir.y * (tMax * 0.6) };
+            c = isValidWorldPoint(guess) ? guess : c0;
+          } else {
+            // bisection
+            for (let it = 0; it < 45; it++) {
+              const m = 0.5 * (lo + hi);
+              const fm = f(m);
+              if (!isFinite(fm)) { hi = m; continue; }
+              if (flo * fm <= 0) { hi = m; fhi = fm; }
+              else { lo = m; flo = fm; }
+            }
+            c = { x: mid.x + dir.x * hi, y: mid.y + dir.y * hi };
+          }
+        } else {
+          // bracket direct, bisection
+          for (let it = 0; it < 45; it++) {
+            const m = 0.5 * (lo + hi);
+            const fm = f(m);
+            if (!isFinite(fm)) { hi = m; continue; }
+            if (flo * fm <= 0) { hi = m; fhi = fm; }
+            else { lo = m; flo = fm; }
+          }
+          c = { x: mid.x + dir.x * hi, y: mid.y + dir.y * hi };
+        }
+      }
+    }
+
+    if (!isValidWorldPoint(c)) return C;
+
+    // update stored point position
+    setPoints((prev) => prev.map((p) => (p.id === C.id ? { ...p, p: c } : p)));
+    return { ...C, p: c };
+  };
+
+  const validateFigures = () => {
+    const allowCreate = pointMode === "NEW";
+
+    if (figureCmd === "CIRCLE") {
+      startPointSession(
+        2,
+        allowCreate,
+        "Cercle : sélectionne 2 points (centre O, puis point P sur le cercle).",
+        (pts) => {
+          speakThen(() => {
+            const [O, P] = pts;
+            const R = distanceExact(space, O.p, P.p);
+
+            // 1) Aller au centre (sans tracer)
+            const frog = frogWorldPos(stateRef.current);
+            stateRef.current = animatePath(stateRef.current, [frog, O.p], animSpeed, false);
+
+            const tCenter = window.setInterval(() => {
+              if (stateRef.current.anim.active) return;
+              window.clearInterval(tCenter);
+
+              // On génère un cercle "complet" via buildCircleTrace (autour de O)
+              const { path, traceColor } = buildCircleTrace(stateRef.current, R);
+
+              // 2) Extraire la partie "cercle" (distance intrinsèque ~ R), PAS le rayon
+              const dToCenter = path.map((pt) => distanceExact(space, O.p, pt));
+              const thr = R * 0.985;
+
+              let startIdx = dToCenter.findIndex((d) => d >= thr);
+              if (startIdx < 0) startIdx = 0;
+
+              let endIdx = path.length - 1;
+              while (endIdx > startIdx && dToCenter[endIdx] < thr) endIdx--;
+
+              let circleRaw = path.slice(startIdx, endIdx + 1);
+              if (circleRaw.length < 8) circleRaw = path.slice(); // fallback
+
+              // 3) Faire commencer le cercle au point P (au plus proche)
+              let bestI = 0;
+              let bestD = Infinity;
+              for (let i = 0; i < circleRaw.length; i++) {
+                const d = dist2(circleRaw[i], P.p);
+                if (d < bestD) {
+                  bestD = d;
+                  bestI = i;
+                }
+              }
+              const circleRot = [...circleRaw.slice(bestI), ...circleRaw.slice(0, bestI)];
+
+              // 4) Chemin de tracé :
+              //    - commence EXACTEMENT en P
+              //    - fait un tour complet
+              //    - repasse légèrement sur le début (overlap)
+              const overlapN = Math.min(12, Math.max(2, Math.floor(circleRot.length * 0.05)));
+
+              // --- À partir d'ici, on construit tracePath différemment selon l'espace ---
+              
+              let tracePath: Vec2[] = [];
+              let circleZ: number[] | undefined = undefined;
+
+              if (space === "H") {
+                // ✅ vrai cercle hyperbolique (distance géodésique constante), qui passe par P
+                tracePath = buildHyperbolicCirclePath(O.p, P.p, R, 720, 0.06);
+              } else if (space === "S") {
+                // ✅ cercle sphérique géodésique complet (devant + derrière) + z pour pointillés
+                const sph = buildSphericalCirclePath3D(O.p, P.p, R, 720, 0.06);
+                tracePath = sph.xy;
+                circleZ = sph.z;
+              } else {
+                // espace euclidien : cercle du moteur, réordonné pour commencer sur P + overlap
+                tracePath = [P.p, ...circleRot, P.p, ...circleRot.slice(0, overlapN)];
+              }
+// 5) Aller en P sans tracer (pour "démarrer au point donné")
+              stateRef.current = animatePath(stateRef.current, [O.p, P.p], animSpeed, false);
+
+              const tToP = window.setInterval(() => {
+                if (stateRef.current.anim.active) return;
+                window.clearInterval(tToP);
+
+                // 6) Tracer uniquement le cercle (pas de rayon)
+                if (space === "S") {
+                  // en sphère : pas de tracé engine (pour pouvoir faire pointillés derrière)
+                  stateRef.current = animatePath(stateRef.current, tracePath, animSpeed, false);
+                } else {
+                  stateRef.current = startTracing(stateRef.current, traceColor, 3);
+                  stateRef.current = animatePath(stateRef.current, tracePath, animSpeed, true);
+                }
+
+                const tDone = window.setInterval(() => {
+                  if (stateRef.current.anim.active) return;
+                  window.clearInterval(tDone);
+
+                  if (space !== "S") {
+                    stateRef.current = finishTracing(stateRef.current);
+                  }
+                  setRenderState(stateRef.current);
+
+                  if (space === "S") createCircleMeta(O, P, R, tracePath, circleZ);
+                  else createCircleMeta(O, P, R, tracePath);
+
+                  pushSnapshot();
+                }, 25);
+              }, 25);
+            }, 25);
+          });
+        }
+      );
       return;
     }
 
-    /* ----- Line point placement ----- */
-    if (toolMode === "PLACE_LINE_2PTS") {
-      setLinePts((prev) => {
-        if (prev.length >= 2) return [w];
-        return [...prev, w];
+    // Triangle
+    startPointSession(3, allowCreate, "Triangle : sélectionne 3 points (A, B, C).", (pts, created) => {
+      speakThen(() => {
+        let [A, B, C] = pts;
+        // apply triangle type by adjusting C when possible
+        const C2 = applyTriangleType(triangleType, A, B, C, created);
+        C = C2;
+
+        const polyPts = [A.p, B.p, C.p];
+
+        // Build segment metas (for lengths) and triangle meta
+        createTriangleMeta(triangleType, A, B, C);
+        createSegmentMeta(A, B, geodesicBetween(space, A.p, B.p, 260));
+        createSegmentMeta(B, C, geodesicBetween(space, B.p, C.p, 260));
+        createSegmentMeta(C, A, geodesicBetween(space, C.p, A.p, 260));
+
+        tracePolylineClosed(polyPts, () => {
+          pushSnapshot();
+        });
+      });
+    });
+  };
+
+  const validateSegments = () => {
+    const allowCreate = pointMode === "NEW";
+
+    if (segmentCmd === "MIDPOINT") {
+      setHudText("Clique un segment existant pour créer son milieu.");
+      return;
+    }
+
+    if (segmentCmd === "SEGMENT") {
+      startPointSession(2, allowCreate, "Segment : sélectionne 2 points (A, B).", (pts) => {
+        speakThen(() => {
+          const [A, B] = pts;
+          const poly = geodesicBetween(space, A.p, B.p, 260);
+          createSegmentMeta(A, B, poly);
+          traceSingleGeodesic(A.p, B.p, () => pushSnapshot());
+        });
+      });
+      return;
+    }
+
+    // SPECIAL
+    if (segmentSpecial === "ALTITUDE") {
+      startPointSession(3, allowCreate, "Hauteur : sélectionne 3 points (A, B, C). La hauteur sera issue de C sur (AB).", (pts) => {
+        speakThen(() => {
+          const [A, B, C] = pts;
+          // Euclidean foot of perpendicular from C to line AB (in model coords)
+          const ab = { x: B.p.x - A.p.x, y: B.p.y - A.p.y };
+          const t = dot2({ x: C.p.x - A.p.x, y: C.p.y - A.p.y }, ab) / (dot2(ab, ab) || 1);
+          const Fp = { x: A.p.x + ab.x * t, y: A.p.y + ab.y * t };
+          if (!isValidWorldPoint(Fp)) {
+            setHudText("Hauteur impossible à cet endroit.");
+            return;
+          }
+          const F = createPoint(Fp);
+          const poly = geodesicBetween(space, C.p, F.p, 260);
+          createSegmentMeta(C, F, poly);
+          traceSingleGeodesic(C.p, F.p, () => pushSnapshot());
+        });
+      });
+      return;
+    }
+
+    if (segmentSpecial === "RADIUS") {
+      startPointSession(2, allowCreate, "Rayon : sélectionne 2 points (centre O, point P).", (pts) => {
+        speakThen(() => {
+          const [O, P] = pts;
+          const poly = geodesicBetween(space, O.p, P.p, 260);
+          createSegmentMeta(O, P, poly);
+          traceSingleGeodesic(O.p, P.p, () => pushSnapshot());
+        });
+      });
+      return;
+    }
+
+    if (segmentSpecial === "DIAMETER") {
+      startPointSession(2, allowCreate, "Diamètre : sélectionne 2 points (centre O, point P).", (pts) => {
+        speakThen(() => {
+          const [O, P] = pts;
+          const Qp = { x: 2 * O.p.x - P.p.x, y: 2 * O.p.y - P.p.y };
+          if (!isValidWorldPoint(Qp)) {
+            setHudText("Diamètre impossible à cet endroit.");
+            return;
+          }
+          const Q = createPoint(Qp);
+          const poly = geodesicBetween(space, P.p, Q.p, 260);
+          createSegmentMeta(P, Q, poly);
+          traceSingleGeodesic(P.p, Q.p, () => pushSnapshot());
+        });
       });
       return;
     }
   };
 
-  /* ---------- Drawing ---------- */
+  const validateAngles = () => {
+    const allowCreate = pointMode === "NEW";
+
+    startPointSession(2, allowCreate, "Angle : sélectionne A puis B (sommet). C sera construit automatiquement.", (pts) => {
+      speakThen(() => {
+        const [A, B] = pts;
+
+        const BA = { x: A.p.x - B.p.x, y: A.p.y - B.p.y };
+        const u0 = normalize2(BA);
+
+        const dir = rotate2D(u0, angleDeg);
+        const L = Math.max(0.45, euclidLen(A.p, B.p)); // visual length in model coords
+        const Cp = { x: B.p.x + dir.x * L, y: B.p.y + dir.y * L };
+
+        if (!isValidWorldPoint(Cp)) {
+          setHudText("Construction de l’angle impossible à cet endroit.");
+          return;
+        }
+
+        const C = createPoint(Cp);
+
+        // store segment metas (for lengths)
+        createSegmentMeta(B, A, geodesicBetween(space, B.p, A.p, 260));
+        createSegmentMeta(B, C, geodesicBetween(space, B.p, C.p, 260));
+
+        // Trace rays: B->A then B->C
+        const frog = frogWorldPos(stateRef.current);
+        stateRef.current = animatePath(stateRef.current, [frog, B.p], animSpeed, false);
+
+        let phase: "MOVE" | "TRACE_BA" | "MOVE_BACK" | "TRACE_BC" = "MOVE";
+
+        const timer = window.setInterval(() => {
+          if (stateRef.current.anim.active) return;
+
+          if (phase === "MOVE") {
+            stateRef.current = startTracing(stateRef.current, "#0f172a", 3);
+            phase = "TRACE_BA";
+            return;
+          }
+
+          if (phase === "TRACE_BA") {
+            const pathBA = geodesicBetween(space, B.p, A.p, 260);
+            stateRef.current = animatePath(stateRef.current, pathBA, animSpeed, true);
+            phase = "MOVE_BACK";
+            return;
+          }
+
+          if (phase === "MOVE_BACK") {
+            // move back to B without tracing
+            stateRef.current = finishTracing(stateRef.current);
+            stateRef.current = animatePath(stateRef.current, [A.p, B.p], animSpeed, false);
+            phase = "TRACE_BC";
+            return;
+          }
+
+          if (phase === "TRACE_BC") {
+            const pathBC = geodesicBetween(space, B.p, C.p, 260);
+            stateRef.current = startTracing(stateRef.current, "#0f172a", 3);
+            stateRef.current = animatePath(stateRef.current, pathBC, animSpeed, true);
+
+            window.clearInterval(timer); // IMPORTANT: sinon ça relance TRACE_BC en boucle
+
+            const t2 = window.setInterval(() => {
+              if (stateRef.current.anim.active) return;
+              window.clearInterval(t2);
+              stateRef.current = finishTracing(stateRef.current);
+              setRenderState(stateRef.current);
+              pushSnapshot();
+            }, 25);
+          }
+        }, 25);
+      });
+    });
+  };
+
+  /* ---------------- Mouse move (optional hover hints) ---------------- */
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    // We keep this empty for now (no hover UI requested).
+    void e;
+  };
+
+  /* ---------------- Angle display for line intersections ---------------- */
+  const computeLineIntersections = () => {
+    const res: {
+      p: Vec2;
+      u1: Vec2;
+      u2: Vec2;
+      thetaDeg: number;
+    }[] = [];
+
+    const Ls = linesRef.current;
+    if (Ls.length < 2) return res;
+
+    const dedupThr2 = 0.0009;
+
+    const add = (p: Vec2, u1: Vec2, u2: Vec2) => {
+      // dedup
+      if (res.some((x) => dist2(x.p, p) < dedupThr2)) return;
+      // approximate tangent points for spherical angle
+      const eps = 0.02;
+      const A = { x: p.x + u1.x * eps, y: p.y + u1.y * eps };
+      const C = { x: p.x + u2.x * eps, y: p.y + u2.y * eps };
+      const ang = angleHand(space, A, p, C);
+      const thetaDeg = (ang * 180) / Math.PI;
+      res.push({ p, u1, u2, thetaDeg });
+    };
+
+    // segment-segment intersection in 2D
+    const segIntersect = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
+      const r = { x: b.x - a.x, y: b.y - a.y };
+      const s = { x: d.x - c.x, y: d.y - c.y };
+      const rxs = cross2(r, s);
+      const q_p = { x: c.x - a.x, y: c.y - a.y };
+      const qpxr = cross2(q_p, r);
+
+      if (Math.abs(rxs) < 1e-10) return null; // parallel
+      const t = cross2(q_p, s) / rxs;
+      const u = qpxr / rxs;
+
+      if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
+        return { x: a.x + t * r.x, y: a.y + t * r.y };
+      }
+      return null;
+    };
+
+    for (let i = 0; i < Ls.length; i++) {
+      for (let j = i + 1; j < Ls.length; j++) {
+        const A = Ls[i].pts;
+        const B = Ls[j].pts;
+
+        // find first intersection among polyline segments (good enough)
+        outer: for (let a = 0; a < A.length - 1; a++) {
+          for (let b = 0; b < B.length - 1; b++) {
+            const p = segIntersect(A[a], A[a + 1], B[b], B[b + 1]);
+            if (!p) continue;
+
+            const u1 = normalize2({ x: A[a + 1].x - A[a].x, y: A[a + 1].y - A[a].y });
+            const u2 = normalize2({ x: B[b + 1].x - B[b].x, y: B[b + 1].y - B[b].y });
+            add(p, u1, u2);
+            break outer;
+          }
+        }
+      }
+    }
+
+    return res;
+  };
+
+  /* ---------------- Drawing ---------------- */
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -544,11 +1536,37 @@ export default function App() {
 
     const st = renderState;
     const vp = makeViewport(canvas.width, canvas.height, 1.25);
+    const drawPolylineZ = (pts: Vec2[], z: number[] | undefined, color: string, width: number) => {
+      if (pts.length < 2) return;
 
+      const JUMP = 0.35; // même seuil que drawPolyline
+
+      for (let i = 0; i < pts.length - 1; i++) {
+        // éviter les segments parasites en cas de discontinuité
+        if (euclidLen(pts[i], pts[i + 1]) > JUMP) continue;
+
+        const A = worldToScreen(vp, pts[i]);
+        const B = worldToScreen(vp, pts[i + 1]);
+
+        const zmid = z ? (z[i] + z[i + 1]) * 0.5 : 1;
+
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        if (zmid < 0) ctx.setLineDash([8, 8]); // derrière => pointillés
+        else ctx.setLineDash([]);
+
+        ctx.beginPath();
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
+        ctx.stroke();
+        ctx.restore();
+      }
+    };
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#ffffff";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-
+    
     const drawDiskBoundary = () => {
       if (st.space !== "H" && st.space !== "S") return;
       const c = worldToScreen(vp, { x: 0, y: 0 });
@@ -580,32 +1598,32 @@ export default function App() {
       ctx.restore();
     };
 
-    drawDiskBoundary();
-
-    const isLineHoveredOrSelected = (id: string) => {
-      if (toolMode !== "MEASURE") return false;
-      const hoverOK = hovered?.kind === "line" && hovered.id === id;
-      const selOK = selected.some((s) => s.kind === "line" && s.id === id);
-      return hoverOK || selOK;
-    };
-
-    const isEngineSegHoveredOrSelected = (segId: string) => {
-      if (toolMode !== "MEASURE") return false;
-      const hoverOK = hovered?.kind === "segment" && hovered.id === segId;
-      const selOK = selected.some((s) => s.kind === "segment" && s.id === segId);
-      return hoverOK || selOK;
-    };
-
     const drawPolyline = (pts: Vec2[], color: string, width: number) => {
       if (pts.length < 2) return;
+
+      const JUMP = 0.35; // seuil en coords monde (à ajuster si besoin)
+
       ctx.strokeStyle = color;
       ctx.lineWidth = width;
       ctx.beginPath();
-      pts.forEach((pw, i) => {
-        const p = worldToScreen(vp, pw);
-        if (i === 0) ctx.moveTo(p.x, p.y);
-        else ctx.lineTo(p.x, p.y);
-      });
+
+      for (let i = 0; i < pts.length; i++) {
+        const p = worldToScreen(vp, pts[i]);
+
+        if (i === 0) {
+          ctx.moveTo(p.x, p.y);
+          continue;
+        }
+
+        const d = euclidLen(pts[i - 1], pts[i]);
+        if (d > JUMP) {
+          // discontinuité => on ne relie pas par un segment droit
+          ctx.moveTo(p.x, p.y);
+        } else {
+          ctx.lineTo(p.x, p.y);
+        }
+      }
+
       ctx.stroke();
     };
 
@@ -615,99 +1633,186 @@ export default function App() {
       ctx.beginPath();
       ctx.arc(s.x, s.y, 6, 0, Math.PI * 2);
       ctx.fill();
+
       ctx.fillStyle = "#0f172a";
       ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "alphabetic";
       ctx.fillText(label, s.x + 10, s.y - 10);
     };
 
+    const drawSegmentLabel = (S: SegmentMeta) => {
+      const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
+      const n = perp2(u);
+      const pos = { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
+
+      const s = worldToScreen(vp, pos);
+
+      const d = distanceExact(space, S.a, S.b);
+      const textAB = `${S.A}${S.B}`;
+      const text = `${textAB} = ${formatDistance(d)}`;
+
+      ctx.save();
+      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.fillStyle = "#0f172a";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+
+      ctx.fillText(text, s.x, s.y);
+
+      // Draw overline over AB
+      const wAB = ctx.measureText(textAB).width;
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y - 10);
+      ctx.lineTo(s.x + wAB, s.y - 10);
+      ctx.stroke();
+
+      ctx.restore();
+    };
+
+    drawDiskBoundary();
+
     withDiskClip(() => {
-      // custom lines
+      // Custom geodesic lines
       for (const L of lines) {
-        const active = isLineHoveredOrSelected(L.id);
-        const color = toolMode === "MEASURE" ? (active ? "#0f172a" : "#94a3b8") : "#0f172a";
-        const width = toolMode === "MEASURE" ? (active ? 3.5 : 2.5) : 3;
-        drawPolyline(L.pts, color, width);
+        // Si on est en sphérique et qu’on a z[], on dessine plein/pointillé selon z
+        if (space === "S" && (L as any).z) {
+          drawPolylineZ(L.pts, (L as any).z, "#0f172a", 3);
+        } else {
+          drawPolyline(L.pts, "#0f172a", 3);
+        }
+
+
+      // Spherical circles: full circle with front/back (z) => pointillés derrière
+      if (space === "S") {
+        for (const C of circles) {
+          if (C.z) drawPolylineZ(C.poly, C.z, "#0f172a", 3);
+        }
+      }
       }
 
-      // engine shapes
+      // Engine shapes (segments/circles/triangles traced by frog)
       const shapes: any[] = st.shapes as any[];
       for (let si = 0; si < shapes.length; si++) {
         const sh = shapes[si];
-        if (sh.kind === "polyline") {
-          const pts: Vec2[] = sh.pts;
-          let color = sh.color;
-          let width = sh.width;
-
-          if (toolMode === "MEASURE") {
-            let active = false;
-            for (let i = 0; i < pts.length - 1; i++) {
-              const id = `engine:${si}:${i}`;
-              if (isEngineSegHoveredOrSelected(id)) {
-                active = true;
-                break;
-              }
-            }
-            color = active ? "#0f172a" : "#94a3b8";
-            width = active ? Math.max(3, sh.width) : Math.max(2, sh.width - 1);
-          }
-          drawPolyline(pts, color, width);
-        }
+        if (sh.kind === "polyline") drawPolyline(sh.pts, sh.color, sh.width);
         if (sh.kind === "marker") {
           const p = worldToScreen(vp, sh.p);
-          ctx.fillStyle = toolMode === "MEASURE" ? "#94a3b8" : sh.color;
+          ctx.fillStyle = sh.color;
           ctx.beginPath();
           ctx.arc(p.x, p.y, 5, 0, Math.PI * 2);
           ctx.fill();
         }
       }
 
-      // inProgress
       if (st.inProgress?.kind === "polyline") {
         const sh: any = st.inProgress;
-        const color = toolMode === "MEASURE" ? "#94a3b8" : sh.color;
-        drawPolyline(sh.pts, color, sh.width);
+        drawPolyline(sh.pts, sh.color, sh.width);
       }
 
-      // magic reveal
+      // magic reveal for lines
       const ml = magicLineRef.current;
       if (ml && ml.pts.length >= 2) {
         const t = clamp(ml.t, 0, 1);
         const k = Math.max(2, Math.floor(t * ml.pts.length));
-        const pts = ml.pts.slice(0, k);
-        const color = toolMode === "MEASURE" ? "#94a3b8" : "#0f172a";
-        drawPolyline(pts, color, 3);
+        drawPolyline(ml.pts.slice(0, k), "#0f172a", 3);
       }
 
-      // points for modes
-      figPts.forEach((p, i) => drawPoint(p, `P${i + 1}`, "#ef4444"));
-      linePts.forEach((p, i) => drawPoint(p, `L${i + 1}`, "#ef4444"));
+      // Points
+      points.forEach((p) => drawPoint(p.p, p.label, "#2563eb"));
 
-      // (f) op point shown
-      if (opPoint) drawPoint(opPoint, "•", "#2563eb");
+      // Length labels
+      if (showLengths) {
+        segments.forEach(drawSegmentLabel);
+      }
 
-      // (f) hand measure points
-      handPts.forEach((p, i) => drawPoint(p, ["A", "B", "C"][i] ?? `M${i+1}`, "#16a34a"));
+      // Angles
+      if (showAngles) {
+        // Triangle angles (one per vertex)
+        ctx.save();
+        ctx.font = "14px ui-sans-serif, system-ui";
+        ctx.fillStyle = "#0f172a";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        for (const T of triangles) {
+          const A = T.A.p,
+            B = T.B.p,
+            C = T.C.p;
 
-      // angle hint
-      const hint = angleHintRef.current;
-      if (hint) {
-        const v = worldToScreen(vp, hint.vertex);
-        const r = 34;
-        const v1 = worldToScreen(vp, { x: hint.vertex.x + hint.v1.x * 0.22, y: hint.vertex.y + hint.v1.y * 0.22 });
-        const v2 = worldToScreen(vp, { x: hint.vertex.x + hint.v2.x * 0.22, y: hint.vertex.y + hint.vertex.y * 0 + hint.v2.y * 0.22 });
-        const a1 = Math.atan2(v1.y - v.y, v1.x - v.x);
-        const a2 = Math.atan2(v2.y - v.y, v2.x - v.x);
-        ctx.strokeStyle = hint.isObtuse ? "#ef4444" : "#16a34a";
-        ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.arc(v.x, v.y, r, a1, a2, false);
-        ctx.stroke();
+          const angleAt = (P: Vec2, Q: Vec2, R: Vec2) => {
+            const ang = angleHand(space, P, Q, R);
+            return (ang * 180) / Math.PI;
+          };
+
+          const showAt = (vertex: Vec2, dir: Vec2, deg: number) => {
+            const v = { x: vertex.x + dir.x * 0.11, y: vertex.y + dir.y * 0.11 };
+            const s = worldToScreen(vp, v);
+            ctx.fillText(`${deg.toFixed(0)}°`, s.x, s.y);
+          };
+
+          const uAB = normalize2({ x: A.x - B.x, y: A.y - B.y });
+          const uCB = normalize2({ x: C.x - B.x, y: C.y - B.y });
+          const bisB = normalize2({ x: uAB.x + uCB.x, y: uAB.y + uCB.y });
+
+          const uBA = normalize2({ x: B.x - A.x, y: B.y - A.y });
+          const uCA = normalize2({ x: C.x - A.x, y: C.y - A.y });
+          const bisA = normalize2({ x: uBA.x + uCA.x, y: uBA.y + uCA.y });
+
+          const uAC = normalize2({ x: A.x - C.x, y: A.y - C.y });
+          const uBC = normalize2({ x: B.x - C.x, y: B.y - C.y });
+          const bisC = normalize2({ x: uAC.x + uBC.x, y: uAC.y + uBC.y });
+
+          showAt(B, bisB, angleAt(A, B, C));
+          showAt(A, bisA, angleAt(B, A, C));
+          showAt(C, bisC, angleAt(A, C, B));
+        }
+        ctx.restore();
+
+        // 4 angles at line intersections
+        const ints = computeLineIntersections();
+        ctx.save();
+        ctx.font = "13px ui-sans-serif, system-ui";
+        ctx.fillStyle = "#0f172a";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        for (const it of ints) {
+          const p = it.p;
+          const u1 = it.u1;
+          const u2 = it.u2;
+
+          const theta = clamp(it.thetaDeg, 0, 180);
+          const other = 180 - theta;
+
+          const b1 = normalize2({ x: u1.x + u2.x, y: u1.y + u2.y });
+          const b2 = normalize2({ x: u1.x - u2.x, y: u1.y - u2.y });
+          const b3 = normalize2({ x: -u1.x + u2.x, y: -u1.y + u2.y });
+          const b4 = normalize2({ x: -u1.x - u2.x, y: -u1.y - u2.y });
+
+          const r = 0.12;
+
+          const drawVal = (dir: Vec2, val: number) => {
+            const q = { x: p.x + dir.x * r, y: p.y + dir.y * r };
+            const s = worldToScreen(vp, q);
+            ctx.fillText(`${val.toFixed(0)}°`, s.x, s.y);
+          };
+
+          drawVal(b1, theta);
+          drawVal(b4, theta);
+          drawVal(b2, other);
+          drawVal(b3, other);
+        }
+        ctx.restore();
       }
     });
 
-    // Frog drawn AFTER clip => never hidden behind disk
+    // Frog AFTER clip
     const fw = frogWorldPos(st);
     const fp = worldToScreen(vp, fw);
+
     ctx.font = "30px serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -722,308 +1827,68 @@ export default function App() {
     ctx.moveTo(fp.x, fp.y);
     ctx.lineTo(tip.x, tip.y);
     ctx.stroke();
-  }, [renderState, space, toolMode, hovered, selected, figPts, linePts, lines, opPoint, handPts]);
 
-  /* ---------- Actions ---------- */
-  const doAdvance = () => {
-    if (stateRef.current.anim.active) return;
-    const d = space === "S" ? toSphereUnit(moveDist) : moveDist;
-    const { path, next } = buildAdvancePath(stateRef.current, d);
-    stateRef.current = animatePath(stateRef.current, path, animSpeed, false);
+    // Frog speech bubble (simple)
+    if (frogSpeech) {
+      ctx.save();
+      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
 
-    const timer = window.setInterval(() => {
-      if (!stateRef.current.anim.active) {
-        stateRef.current = next;
-        setRenderState(stateRef.current);
-        window.clearInterval(timer);
-      }
-    }, 20);
-  };
+      const padX = 10;
+      const padY = 8;
+      const textW = ctx.measureText(frogSpeech).width;
+      const boxW = textW + padX * 2;
+      const boxH = 30;
 
-  const doTurn = () => {
-    if (stateRef.current.anim.active) return;
-    stateRef.current = buildTurnAnim(stateRef.current, turnDeg, 0.35);
-  };
+      const bx = fp.x + 26;
+      const by = fp.y - 52;
 
-  const doTraceSegment = () => {
-    if (stateRef.current.anim.active) return;
-    const L = space === "S" ? toSphereUnit(segLen) : segLen;
-    const { path, next, traceColor } = buildGeodesicTrace(stateRef.current, L);
-    stateRef.current = startTracing(stateRef.current, traceColor, 3);
-    stateRef.current = animatePath(stateRef.current, path, animSpeed, true);
+      // rounded rect
+      const r = 10;
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 2;
 
-    const timer = window.setInterval(() => {
-      if (!stateRef.current.anim.active) {
-        stateRef.current = finishTracing({ ...next, inProgress: stateRef.current.inProgress });
-        setRenderState(stateRef.current);
-        window.clearInterval(timer);
-      }
-    }, 20);
-  };
+      ctx.beginPath();
+      ctx.moveTo(bx + r, by);
+      ctx.lineTo(bx + boxW - r, by);
+      ctx.quadraticCurveTo(bx + boxW, by, bx + boxW, by + r);
+      ctx.lineTo(bx + boxW, by + boxH - r);
+      ctx.quadraticCurveTo(bx + boxW, by + boxH, bx + boxW - r, by + boxH);
+      ctx.lineTo(bx + r, by + boxH);
+      ctx.quadraticCurveTo(bx, by + boxH, bx, by + boxH - r);
+      ctx.lineTo(bx, by + r);
+      ctx.quadraticCurveTo(bx, by, bx + r, by);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
 
-  const doTraceCircle = () => {
-    if (stateRef.current.anim.active) return;
-    const R = space === "S" ? toSphereUnit(circleR) : circleR;
-    const { path, next, traceColor } = buildCircleTrace(stateRef.current, R);
-    stateRef.current = startTracing(stateRef.current, traceColor, 3);
-    stateRef.current = animatePath(stateRef.current, path, animSpeed, true);
+      // tail
+      ctx.beginPath();
+      ctx.moveTo(fp.x + 10, fp.y - 20);
+      ctx.lineTo(bx + 18, by + boxH);
+      ctx.lineTo(bx + 32, by + boxH);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
 
-    const timer = window.setInterval(() => {
-      if (!stateRef.current.anim.active) {
-        stateRef.current = finishTracing({ ...next, inProgress: stateRef.current.inProgress });
-        setRenderState(stateRef.current);
-        window.clearInterval(timer);
-      }
-    }, 20);
-  };
-
-  const startFigureMode = () => {
-    if (stateRef.current.anim.active) return;
-    setToolMode("PLACE_FIGURE_POINTS");
-    setLineOpMode("NONE");
-    setHandMode("NONE");
-    setHandPts([]);
-    setOpPoint(null);
-    setFigPts([]);
-    setLinePts([]);
-    setHovered(null);
-    setSelected([]);
-    setMeasurePanelText("MODE FIGURE : place des points puis lance le tracé (fermé).\n");
-    angleHintRef.current = null;
-  };
-
-  const launchFigureTrace = () => {
-    if (stateRef.current.anim.active) return;
-    if (figPts.length < 2) return;
-
-    const first = figPts[0];
-    const frog = frogWorldPos(stateRef.current);
-
-    // move to first WITHOUT tracing
-    stateRef.current = animatePath(stateRef.current, [frog, first], animSpeed, false);
-
-    let phase: "MOVE_TO_FIRST" | "TRACE_EDGES" = "MOVE_TO_FIRST";
-    let segIndex = 0;
-
-    // (a) close figure: include last->first
-    const closedPts = figPts.length >= 2 ? [...figPts, figPts[0]] : figPts;
-
-    const timer = window.setInterval(() => {
-      if (stateRef.current.anim.active) return;
-
-      if (phase === "MOVE_TO_FIRST") {
-        stateRef.current = startTracing(stateRef.current, "#0f172a", 3);
-        phase = "TRACE_EDGES";
-      }
-
-      if (segIndex >= closedPts.length - 1) {
-        stateRef.current = finishTracing(stateRef.current);
-        setRenderState(stateRef.current);
-        window.clearInterval(timer);
-        setToolMode("NONE");
-        setMeasurePanelText("Traçage terminé.\n");
-        return;
-      }
-
-      const a = closedPts[segIndex];
-      const b = closedPts[segIndex + 1];
-      const path = geodesicBetween(space, a, b, 260);
-      stateRef.current = animatePath(stateRef.current, path, animSpeed, true);
-      segIndex++;
-    }, 25);
-  };
-
-  const startLineMode = () => {
-    if (stateRef.current.anim.active) return;
-    setToolMode("PLACE_LINE_2PTS");
-    setLineOpMode("NONE");
-    setHandMode("NONE");
-    setHandPts([]);
-    setOpPoint(null);
-    setLinePts([]);
-    setFigPts([]);
-    setHovered(null);
-    setSelected([]);
-    angleHintRef.current = null;
-    setMeasurePanelText("MODE DROITE : place 2 points pour créer la droite.\n");
-  };
-
-  const launchMagicLine = () => {
-    if (stateRef.current.anim.active) return;
-    if (linePts.length !== 2) return;
-
-    const [a, b] = linePts;
-
-    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-    const frog = frogWorldPos(stateRef.current);
-    stateRef.current = animatePath(stateRef.current, [frog, mid], animSpeed, false);
-
-    const timer = window.setInterval(() => {
-      if (stateRef.current.anim.active) return;
-
-      const pts = geodesicLineThrough(space, a, b, 720); // bigger sampling helps smoothness
-      const id = `L_${Date.now()}`;
-      magicLineRef.current = {
-        active: true,
-        pts,
-        t: 0,
-        finalLine: { id, pts, baseP: a, baseQ: b, space },
-      };
-
-      setToolMode("NONE");
-      setMeasurePanelText("Droite tracée.\n");
-      window.clearInterval(timer);
-    }, 25);
-  };
-
-  const startMeasureMode = () => {
-    if (stateRef.current.anim.active) return;
-    setToolMode("MEASURE");
-    setLineOpMode("NONE");
-    setHovered(null);
-    setSelected([]);
-    angleHintRef.current = null;
-    setMeasurePanelText(
-      "MODE MESURE : actif\n- Survole : sombre\n- Clique : sélection (max 2)\n- Afficher mesures\n- Ou mesures à la main\n"
-    );
-  };
-
-  const exitMeasureMode = () => {
-    setToolMode("NONE");
-    setLineOpMode("NONE");
-    setHandMode("NONE");
-    setHandPts([]);
-    setOpPoint(null);
-    setHovered(null);
-    setSelected([]);
-    angleHintRef.current = null;
-    setMeasurePanelText("MODE MESURE : inactif\n");
-  };
-
-  const showSelectedMeasures = () => {
-    angleHintRef.current = null;
-
-    if (selected.length === 0) {
-      setMeasurePanelText("MODE MESURE : actif\nAucune sélection.\n");
-      return;
+      ctx.fillStyle = "#0f172a";
+      ctx.fillText(frogSpeech, bx + padX, by + boxH / 2);
+      ctx.restore();
     }
 
-    const segs = selected.filter((s) => s.kind === "segment") as PickedSegment[];
-
-    if (segs.length === 1 && selected.length === 1) {
-      const s = segs[0];
-      const L = euclidLen(s.a, s.b);
-      setMeasurePanelText(
-        `MODE MESURE : actif\nOBJET : segment (affiché)\nLONGUEUR ${L.toFixed(4)}\n`
-      );
-      return;
+    // HUD overlay
+    if (hudText) {
+      ctx.save();
+      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.fillStyle = "rgba(15,23,42,0.75)";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(hudText, 14, 14);
+      ctx.restore();
     }
-
-    if (segs.length === 2 && selected.length === 2) {
-      const s1 = segs[0], s2 = segs[1];
-      const thr2 = 0.0008;
-      const endpoints1 = [s1.a, s1.b];
-      const endpoints2 = [s2.a, s2.b];
-
-      let vertex: Vec2 | null = null;
-      let other1: Vec2 | null = null;
-      let other2: Vec2 | null = null;
-
-      for (const e1 of endpoints1) {
-        for (const e2 of endpoints2) {
-          if (dist2(e1, e2) < thr2) {
-            vertex = e1;
-            other1 = dist2(e1, s1.a) < dist2(e1, s1.b) ? s1.b : s1.a;
-            other2 = dist2(e2, s2.a) < dist2(e2, s2.b) ? s2.b : s2.a;
-          }
-        }
-      }
-
-      if (!vertex || !other1 || !other2) {
-        setMeasurePanelText("MODE MESURE : actif\n2 segments sélectionnés mais pas de sommet commun.\n");
-        return;
-      }
-
-      const u1 = { x: other1.x - vertex.x, y: other1.y - vertex.y };
-      const u2 = { x: other2.x - vertex.x, y: other2.y - vertex.y };
-      const n1 = Math.hypot(u1.x, u1.y) || 1;
-      const n2 = Math.hypot(u2.x, u2.y) || 1;
-      const v1 = { x: u1.x / n1, y: u1.y / n1 };
-      const v2 = { x: u2.x / n2, y: u2.y / n2 };
-      const dot = clamp(v1.x * v2.x + v1.y * v2.y, -1, 1);
-      const ang = Math.acos(dot);
-      const deg = (ang * 180) / Math.PI;
-      const isObtuse = deg > 90;
-
-      angleHintRef.current = { vertex, v1, v2, isObtuse };
-
-      setMeasurePanelText(
-        `MODE MESURE : actif\nOBJET : angle entre 2 segments\nANGLE : ${deg.toFixed(2)}°\nTYPE : ${isObtuse ? "obtus" : "aigu"}\n`
-      );
-      return;
-    }
-
-    setMeasurePanelText("MODE MESURE : actif\nSélection non supportée.\n");
-  };
-
-  /* line ops: clicking parallel/perp should auto-enable measure mode */
-  const beginLineOp = (op: LineOpMode) => {
-    if (stateRef.current.anim.active) return;
-    ensureMeasureMode(
-      "OPÉRATION SUR DROITE :\nÉTAPE 1 : clique une droite (sélection)\n"
-    );
-    setHandMode("NONE");
-    setHandPts([]);
-    setOpPoint(null);
-    setLineOpMode(op);
-    setSelected([]);
-  };
-
-  /* hand measures */
-  const startHandDistance = () => {
-    if (stateRef.current.anim.active) return;
-    ensureMeasureMode(
-      "MESURE À LA MAIN : DISTANCE\nClique 2 points A puis B.\n"
-    );
-    setLineOpMode("NONE");
-    setOpPoint(null);
-    setSelected([]);
-    angleHintRef.current = null;
-    setHandPts([]);
-    setHandMode("HAND_DIST");
-  };
-
-  const startHandAngle = () => {
-    if (stateRef.current.anim.active) return;
-    ensureMeasureMode(
-      "MESURE À LA MAIN : ANGLE\nClique 3 points A, B (sommet), C.\n"
-    );
-    setLineOpMode("NONE");
-    setOpPoint(null);
-    setSelected([]);
-    angleHintRef.current = null;
-    setHandPts([]);
-    setHandMode("HAND_ANGLE");
-  };
-
-  const clearHandPts = () => {
-    setHandPts([]);
-    angleHintRef.current = null;
-    setMeasurePanelText("Points de mesure effacés.\n");
-  };
-
-  /* recenter frog */
-  const recenterFrog = () => {
-    if (stateRef.current.anim.active) return;
-    const s = stateRef.current;
-
-    if (space === "E") stateRef.current = { ...s, e_pos: { x: 0, y: 0 } };
-    else if (space === "H") stateRef.current = { ...s, h_pos: { x: 0, y: 0 } };
-    else stateRef.current = { ...s, s_p: { x: 0, y: 0, z: 1 } };
-
-    setRenderState(stateRef.current);
-    setMeasurePanelText("Grenouille recentrée (tracés conservés).\n");
-  };
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
 
   /* UI */
   const CANVAS_W = 1320;
@@ -1046,12 +1911,8 @@ export default function App() {
 
           {space === "S" && (
             <label className="tiny">
-              <input
-                type="checkbox"
-                checked={sphereInDegrees}
-                onChange={(e) => setSphereInDegrees(e.target.checked)}
-              />
-              Distances sphériques en degrés (sinon radians)
+              <input type="checkbox" checked={sphereInDegrees} onChange={(e) => setSphereInDegrees(e.target.checked)} />
+              Afficher les longueurs sphériques en degrés (sinon radians)
             </label>
           )}
         </div>
@@ -1060,28 +1921,7 @@ export default function App() {
       <div className="main-layout">
         <div className="left-col">
           <div className="canvas-panel">
-            <canvas
-              ref={canvasRef}
-              width={CANVAS_W}
-              height={CANVAS_H}
-              onClick={onCanvasClick}
-              onMouseMove={onMouseMove}
-            />
-            <div className="canvas-hud">
-              <div>
-                <strong>Mode :</strong>{" "}
-                {toolMode === "NONE" && "NORMAL"}
-                {toolMode === "PLACE_FIGURE_POINTS" && "TRACER UNE FIGURE"}
-                {toolMode === "PLACE_LINE_2PTS" && "TRACER UNE DROITE (2 points)"}
-                {toolMode === "MEASURE" && "MESURE / SÉLECTION"}
-                {lineOpMode !== "NONE" && ` | OP: ${lineOpMode}`}
-                {handMode !== "NONE" && ` | MAIN: ${handMode}`}
-              </div>
-            </div>
-          </div>
-
-          <div className="measure-shell">
-            <pre>{measurePanelText}</pre>
+            <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} onClick={onCanvasClick} onMouseMove={onMouseMove} />
           </div>
         </div>
 
@@ -1092,180 +1932,134 @@ export default function App() {
           </div>
 
           <section className="section">
-            <h2>Vitesse</h2>
+            <h2>Réglages</h2>
             <label>
               Animation : {animSpeed.toFixed(2)}
-              <input
-                type="range"
-                min={0.4}
-                max={2.0}
-                step={0.05}
-                value={animSpeed}
-                onChange={(e) => setAnimSpeed(parseFloat(e.target.value))}
-              />
+              <input type="range" min={0.4} max={2.0} step={0.05} value={animSpeed} onChange={(e) => setAnimSpeed(parseFloat(e.target.value))} />
             </label>
-          </section>
-
-          <section className="section">
-            <h2>Actions</h2>
-
-            <div className="grid2">
-              <div className="card">
-                <label>Avancer</label>
-                <input type="number" value={moveDist} onChange={(e) => setMoveDist(parseFloat(e.target.value))} />
-                <button className="btn green" onClick={doAdvance}>Avancer</button>
-              </div>
-
-              <div className="card">
-                <label>Tourner (° ou rad)</label>
-                <input type="number" value={turnDeg} onChange={(e) => setTurnDeg(parseFloat(e.target.value))} />
-                <button className="btn green" onClick={doTurn}>Tourner</button>
-              </div>
-            </div>
 
             <div className="card">
-              <label>Tracer un segment de longueur:</label>
-              <div className="row">
-                <input type="number" value={segLen} onChange={(e) => setSegLen(parseFloat(e.target.value))} />
-                <button className="btn blue" onClick={doTraceSegment}>Segment</button>
-              </div>
-            </div>
-
-            <div className="card">
-              <label>Tracer un cercle de rayon:</label>
-              <div className="row">
-                <input type="number" value={circleR} onChange={(e) => setCircleR(parseFloat(e.target.value))} />
-                <button className="btn blue" onClick={doTraceCircle}>Cercle</button>
-              </div>
+              <div className="tiny">Options de points</div>
+              <label className="tiny">
+                <input type="radio" name="pmode" checked={pointMode === "EXISTING"} onChange={() => setPointMode("EXISTING")} />
+                À partir de points existants
+              </label>
+              <label className="tiny">
+                <input type="radio" name="pmode" checked={pointMode === "NEW"} onChange={() => setPointMode("NEW")} />
+                Je souhaite créer de nouveaux points
+              </label>
             </div>
           </section>
 
           <section className="section">
-            <h2>Tracer une figure</h2>
+            <h2>Droites</h2>
             <div className="card">
-              <div className="row">
-                <button className={`btn ${toolMode === "PLACE_FIGURE_POINTS" ? "dark" : "gray"}`} onClick={startFigureMode}>
-                  Mode points
-                </button>
-                <button className="btn gray" onClick={() => setFigPts([])}>Effacer</button>
-              </div>
-              <button className="btn purple" onClick={launchFigureTrace}>
-                Lancer le tracé (figure fermée)
+              <label>Commande</label>
+              <select value={lineCmd} onChange={(e) => setLineCmd(e.target.value as any)}>
+                <option value="LINE_2PTS">Tracer une droite à partir de deux points</option>
+                <option value="PARALLEL">Tracer la parallèle d'une droite passant par un point</option>
+                <option value="PERPENDICULAR">Tracer la perpendiculaire d'une droite passant par un point</option>
+              </select>
+
+              <button className="btn purple" onClick={validateLines}>
+                Validez la commande
               </button>
-              <div className="tiny">Placer les Points : {figPts.length} (clic sur le canvas)</div>
-            </div>
-          </section>
 
-          <section className="section">
-            <h2>Tracer une droite</h2>
-            <div className="card">
-              <div className="row">
-                <button className={`btn ${toolMode === "PLACE_LINE_2PTS" ? "dark" : "gray"}`} onClick={startLineMode}>
-                  Placer les 2 points
-                </button>
-                <button className="btn gray" onClick={() => setLinePts([])}>Effacer</button>
+              <div className="tiny">
+                Pour parallèle/perpendiculaire : il faut d'abord avoir tracé une droite, puis cliquer dessus.
               </div>
-              <button className="btn purple" onClick={launchMagicLine}>
-                Créer la droite
-              </button>
-              <div className="tiny">Points : {linePts.length}/2</div>
             </div>
           </section>
 
           <section className="section">
-            <h2>Mesure</h2>
+            <h2>Figures</h2>
             <div className="card">
-              {toolMode !== "MEASURE" ? (
-                <button className="btn purple" onClick={startMeasureMode}>Activer mode mesure</button>
-              ) : (
-                <button className="btn gray" onClick={exitMeasureMode}>Quitter mode mesure</button>
+              <label>Commande</label>
+              <select value={figureCmd} onChange={(e) => setFigureCmd(e.target.value as any)}>
+                <option value="TRIANGLE">Tracer un triangle</option>
+                <option value="CIRCLE">Tracer un cercle (centre puis point)</option>
+              </select>
+
+              {figureCmd === "TRIANGLE" && (
+                <>
+                  <label>Type de triangle</label>
+                  <select value={triangleType} onChange={(e) => setTriangleType(e.target.value as any)}>
+                    <option value="ISOSCELES">Triangle isocèle</option>
+                    <option value="EQUILATERAL">Triangle équilatéral</option>
+                    <option value="RIGHT">Triangle rectangle</option>
+                    <option value="ANY">Triangle quelconque</option>
+                  </select>
+                  <div className="tiny">
+                    Remarque : les types utilisent une construction euclidienne dans le modèle (C est ajusté si créé pendant la commande).
+                  </div>
+                </>
               )}
 
-              <button className="btn purple" disabled={toolMode !== "MEASURE"} onClick={showSelectedMeasures}>
-                Afficher mesures de la sélection
-              </button>
-
-              <div className="grid2">
-                <button className="btn blue" onClick={startHandDistance}>
-                  Distance à partir de 2 points
-                </button>
-                <button className="btn blue" onClick={startHandAngle}>
-                  Angle à partir de 3 points
-                </button>
-              </div>
-
-              <button className="btn gray" disabled={toolMode !== "MEASURE"} onClick={clearHandPts}>
-                Effacer points (main)
-              </button>
-            </div>
-
-            <div className="card">
-              <h3>Opérations sur droites (2 étapes)</h3>
-              <div className="tiny">
-                1) cliquer une droite<br />
-                2) cliquer à l'endroit où la droite doit passer
-              </div>
-
-              <div className="grid2">
-                <button className="btn blue" onClick={() => beginLineOp("PARALLEL_0")}>
-                  Parallèle
-                </button>
-              </div>
-
-              <button className="btn blue" onClick={() => beginLineOp("PERPENDICULAR")}>
-                Perpendiculaire
+              <button className="btn purple" onClick={validateFigures}>
+                Validez la commande
               </button>
             </div>
           </section>
 
           <section className="section">
-            <h2>Panneau reset</h2>
+            <h2>Segments</h2>
+            <div className="card">
+              <label>Commande</label>
+              <select value={segmentCmd} onChange={(e) => setSegmentCmd(e.target.value as any)}>
+                <option value="SEGMENT">Tracer un segment</option>
+                <option value="SPECIAL">Tracer un segment spécial</option>
+                <option value="MIDPOINT">Scinder un segment en son milieu</option>
+              </select>
+
+              {segmentCmd === "SPECIAL" && (
+                <>
+                  <label>Type</label>
+                  <select value={segmentSpecial} onChange={(e) => setSegmentSpecial(e.target.value as any)}>
+                    <option value="ALTITUDE">Hauteur d'un triangle</option>
+                    <option value="RADIUS">Rayon d'un cercle</option>
+                    <option value="DIAMETER">Diamètre d'un cercle</option>
+                  </select>
+                </>
+              )}
+
+              <label className="tiny">
+                <input type="checkbox" checked={showLengths} onChange={(e) => setShowLengths(e.target.checked)} />
+                Afficher toutes les longueurs
+              </label>
+
+              <button className="btn purple" onClick={validateSegments}>
+                Validez la commande
+              </button>
+            </div>
+          </section>
+
+          <section className="section">
+            <h2>Angles</h2>
+            <div className="card">
+              <label>Tracer un angle de mesure : {angleDeg}°</label>
+              <input type="range" min={0} max={180} step={5} value={angleDeg} onChange={(e) => setAngleDeg(parseInt(e.target.value, 10))} />
+
+              <label className="tiny">
+                <input type="checkbox" checked={showAngles} onChange={(e) => setShowAngles(e.target.checked)} />
+                Afficher toutes les mesures d'angles
+              </label>
+
+              <button className="btn purple" onClick={validateAngles}>
+                Validez la commande
+              </button>
+
+              <div className="tiny">La grenouille construit un angle ABC : clique A puis B (sommet). C est créé automatiquement.</div>
+            </div>
+          </section>
+
+          <section className="section">
+            <h2>Effacer</h2>
             <div className="row">
-              <button
-                className="btn gray"
-                onClick={() => {
-                  if (stateRef.current.anim.active) return;
-                  const ok = window.confirm("Confirmer : effacer tous les tracés?");
-                  if (!ok) return;
-                  stateRef.current = clearShapes(stateRef.current);
-                  setRenderState(stateRef.current);
-                  magicLineRef.current = null;
-                  setLines([]);
-                  setMeasurePanelText("Tracés effacés.\n");
-                }}
-              >
-                Effacer tracés
+              <button className="btn gray" onClick={undoLast}>
+                Effacer le dernier tracé
               </button>
-
-              <button
-                className="btn gray"
-                onClick={() => {
-                  if (stateRef.current.anim.active) return;
-                  const ok = window.confirm("Confirmer : reset complet (tracés + position) ?");
-                  if (!ok) return;
-
-                  stateRef.current = reset(stateRef.current, space);
-                  setRenderState(stateRef.current);
-                  setFigPts([]);
-                  setLinePts([]);
-                  setLines([]);
-                  setSelected([]);
-                  setHovered(null);
-                  magicLineRef.current = null;
-                  angleHintRef.current = null;
-                  setLineOpMode("NONE");
-                  setHandMode("NONE");
-                  setHandPts([]);
-                  setOpPoint(null);
-                  setToolMode("NONE");
-                  setMeasurePanelText("Reset effectué.\n");
-                }}
-              >
-                Reset total
-              </button>
-
-              <button className="btn gray" onClick={recenterFrog}>
-                Recentrer grenouille
+              <button className="btn gray" onClick={clearAll}>
+                Effacer tout
               </button>
             </div>
           </section>
