@@ -35,6 +35,26 @@ function screenToWorld(vp: any, p: Vec2): Vec2 {
 }
 
 /* ---------------- Helpers ---------------- */
+function roundTriangleAnglesTo180(degs: number[]) {
+  // degs: [A,B,C] en degrés (flottants)
+  const floors = degs.map(Math.floor);
+  let sum = floors[0] + floors[1] + floors[2];
+  let need = 180 - sum;
+
+  const frac = degs.map((d, i) => ({ i, f: d - floors[i] }));
+  // si on doit ajouter, on donne aux plus grosses fractions
+  // si on doit enlever, on retire aux plus petites fractions
+  frac.sort((a, b) => (need >= 0 ? b.f - a.f : a.f - b.f));
+
+  const ints = [...floors];
+  while (need !== 0) {
+    const k = Math.abs(need) > 3 ? 0 : 0; // simple, on boucle sur frac
+    const idx = frac[(Math.abs(need) - 1) % 3].i;
+    ints[idx] += need > 0 ? 1 : -1;
+    need += need > 0 ? -1 : 1;
+  }
+  return ints;
+}
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const dist2 = (a: Vec2, b: Vec2) => {
   const dx = a.x - b.x,
@@ -481,9 +501,125 @@ export default function App() {
   const [segmentCmd, setSegmentCmd] = useState<"SEGMENT" | "SPECIAL" | "MIDPOINT">("SEGMENT");
   const [segmentSpecial, setSegmentSpecial] = useState<"ALTITUDE" | "RADIUS" | "DIAMETER">("RADIUS");
   const [showLengths, setShowLengths] = useState(false);
+  // layout des étiquettes de longueur (recalculé à l’activation de "Afficher toutes les longueurs")
+  const [lenLabelPos, setLenLabelPos] = useState<Record<string, Vec2>>({});
 
   const [angleDeg, setAngleDeg] = useState(60);
   const [showAngles, setShowAngles] = useState(false);
+
+  // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
+  // (L’utilisateur peut décocher / recocher pour recalculer.)
+  useEffect(() => {
+    if (!showLengths) return;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const vp = makeViewport(canvas.width, canvas.height, 1.25);
+
+    const rects: { x1: number; y1: number; x2: number; y2: number }[] = [];
+    const nextPos: Record<string, Vec2> = {};
+
+    const rectIntersects = (a: any, b: any) =>
+      !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
+
+    const distPointToSegScreen = (p: Vec2, a: Vec2, b: Vec2) => {
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const apx = p.x - a.x, apy = p.y - a.y;
+      const ab2 = abx * abx + aby * aby;
+      if (ab2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+      let t = (apx * abx + apy * aby) / ab2;
+      t = clamp(t, 0, 1);
+      const q = { x: a.x + t * abx, y: a.y + t * aby };
+      return Math.hypot(p.x - q.x, p.y - q.y);
+    };
+
+    // Pré-calcule toutes les polylines segments (en coordonnées écran) pour tester les collisions.
+    const segPolysScreen = segments.map((S) => S.poly.map((pt) => worldToScreen(vp, pt)));
+
+    const minDistToAnySegmentPx = (pScreen: Vec2) => {
+      let best = Infinity;
+      for (const poly of segPolysScreen) {
+        for (let i = 0; i < poly.length - 1; i++) {
+          const d = distPointToSegScreen(pScreen, poly[i], poly[i + 1]);
+          if (d < best) best = d;
+        }
+      }
+      return best;
+    };
+
+    // options candidates
+    const offs = [0.06, -0.06, 0.10, -0.10, 0.14, -0.14, 0.18, -0.18, 0.22, -0.22];
+    const shifts = [0, 0.05, -0.05, 0.10, -0.10];
+
+    // même police que dans drawSegmentLabel
+    ctx.font = "14px ui-sans-serif, system-ui";
+
+    for (let si = 0; si < segments.length; si++) {
+      const S = segments[si];
+
+      // texte (approx) pour les dimensions
+      const d = distanceExact(space, S.a, S.b);
+      const textAB = `${S.A}${S.B}`;
+      const text = `${textAB} = ${formatDistance(d)}`;
+      const w = ctx.measureText(text).width;
+      const h = 18; // approx
+
+      const midIdx = Math.floor(S.poly.length / 2);
+      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+
+      // tangente locale (si possible)
+      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
+      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
+      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
+      const ndir = perp2(tdir);
+
+      let bestCandidate: { pos: Vec2; cost: number } | null = null;
+
+      for (const o of offs) {
+        for (const sh of shifts) {
+          const posW = { x: mid.x + ndir.x * o + tdir.x * sh, y: mid.y + ndir.y * o + tdir.y * sh };
+          if (!isValidWorldPoint(posW)) continue;
+
+          const s = worldToScreen(vp, posW);
+
+          // bounding box (left aligned, middle baseline)
+          const pad = 6;
+          const r = { x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad };
+
+          // hors-cadre => pénalité
+          let cost = 0;
+          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 5;
+
+          // chevauchement avec autres labels
+          for (const rr of rects) {
+            if (rectIntersects(r, rr)) cost += 10;
+          }
+
+          // trop près d’un segment
+          const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
+          const dseg = minDistToAnySegmentPx(center);
+          if (dseg < 14) cost += (14 - dseg) / 2;
+
+          if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
+          if (cost === 0) break;
+        }
+        if (bestCandidate && bestCandidate.cost === 0) break;
+      }
+
+      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.045, y: mid.y + ndir.y * 0.045 };
+      nextPos[S.id] = chosen;
+
+      // enregistrer rect final pour éviter chevauchement
+      const s = worldToScreen(vp, chosen);
+      const pad = 6;
+      rects.push({ x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad });
+    }
+
+    setLenLabelPos(nextPos);
+  }, [showLengths]);
 
   /* HUD */
   const [hudText, setHudText] = useState<string>("");
@@ -1645,7 +1781,7 @@ export default function App() {
       const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
       const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
       const n = perp2(u);
-      const pos = { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
+      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
 
       const s = worldToScreen(vp, pos);
 
@@ -1747,10 +1883,10 @@ export default function App() {
             return (ang * 180) / Math.PI;
           };
 
-          const showAt = (vertex: Vec2, dir: Vec2, deg: number) => {
+          const showAt = (vertex: Vec2, dir: Vec2, degInt: number) => {
             const v = { x: vertex.x + dir.x * 0.11, y: vertex.y + dir.y * 0.11 };
             const s = worldToScreen(vp, v);
-            ctx.fillText(`${deg.toFixed(0)}°`, s.x, s.y);
+            ctx.fillText(`${degInt}°`, s.x, s.y);
           };
 
           const uAB = normalize2({ x: A.x - B.x, y: A.y - B.y });
@@ -1765,9 +1901,17 @@ export default function App() {
           const uBC = normalize2({ x: B.x - C.x, y: B.y - C.y });
           const bisC = normalize2({ x: uAC.x + uBC.x, y: uAC.y + uBC.y });
 
-          showAt(B, bisB, angleAt(A, B, C));
-          showAt(A, bisA, angleAt(B, A, C));
-          showAt(C, bisC, angleAt(A, C, B));
+          const degB = angleAt(A, B, C);
+          const degA = angleAt(B, A, C);
+          const degC = angleAt(A, C, B);
+
+          const raw = [degA, degB, degC];
+          const shown = space === "E" ? roundTriangleAnglesTo180(raw) : raw.map((x) => Math.round(x));
+
+          // puis tu affiches en utilisant shown[]
+          showAt(A, bisA, shown[0]);
+          showAt(B, bisB, shown[1]);
+          showAt(C, bisC, shown[2]);
         }
         ctx.restore();
 
@@ -1888,7 +2032,7 @@ export default function App() {
       ctx.fillText(hudText, 14, 14);
       ctx.restore();
     }
-  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
 
   /* UI */
   const CANVAS_W = 1320;
