@@ -689,12 +689,9 @@ export default function App() {
   };
 
   const formatDistance = (d: number) => {
+    d = d*10;
     if (!isFinite(d)) return "∞";
-    if (space === "S") {
-      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
-      return `${d.toFixed(3)} rad`;
-    }
-    return `${d.toFixed(2)} cm`;
+    return `${d.toFixed(1)} cm`;
   };
 
   const speakThen = (fn: () => void) => {
@@ -2135,7 +2132,7 @@ export default function App() {
           const u2 = it.u2;
 
           const rawTheta = clamp(it.thetaDeg, 0, 180);
-          const theta = Math.abs(rawTheta - 90) < 1 ? 90 : rawTheta;
+          const theta = Math.abs(rawTheta - 90) < 2 ? 90 : rawTheta;
           const other = 180 - theta;
 
           const b1 = normalize2({ x: u1.x + u2.x, y: u1.y + u2.y });
