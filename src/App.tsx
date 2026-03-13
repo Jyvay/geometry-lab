@@ -901,6 +901,24 @@ export default function App() {
   };
 
   /* ---------------- Drawing helpers (actions) ---------------- */
+  const returnFrogToCenter = (onDone?: () => void) => {
+    const center = { x: 0, y: 0 };
+    if (!isValidWorldPoint(center)) {
+      onDone?.();
+      return;
+    }
+
+    const frog = frogWorldPos(stateRef.current);
+    stateRef.current = animatePath(stateRef.current, [frog, center], animSpeed, false);
+
+    const t = window.setInterval(() => {
+      if (stateRef.current.anim.active) return;
+      window.clearInterval(t);
+      setRenderState(stateRef.current);
+      onDone?.();
+    }, 25);
+  };
+
   const traceSingleGeodesic = (a: Vec2, b: Vec2, onDone: () => void) => {
     const frog = frogWorldPos(stateRef.current);
     // Move to start without trace
@@ -922,7 +940,7 @@ export default function App() {
         window.clearInterval(t2);
         stateRef.current = finishTracing(stateRef.current);
         setRenderState(stateRef.current);
-        onDone();
+        returnFrogToCenter(onDone);
       }, 25);
     }, 25);
   };
@@ -948,7 +966,7 @@ export default function App() {
         stateRef.current = finishTracing(stateRef.current);
         setRenderState(stateRef.current);
         window.clearInterval(timer);
-        onDone();
+        returnFrogToCenter(onDone);
         return;
       }
 
@@ -1580,7 +1598,7 @@ export default function App() {
               window.clearInterval(t2);
               stateRef.current = finishTracing(stateRef.current);
               setRenderState(stateRef.current);
-              pushSnapshot();
+              returnFrogToCenter(() => pushSnapshot());
             }, 25);
           }
         }, 25);
