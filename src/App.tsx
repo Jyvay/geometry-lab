@@ -362,6 +362,43 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
   return Math.acos(cos); // radians on unit sphere
 }
 
+function closestPointOnGeodesicSegment(space: SpaceId, A: Vec2, B: Vec2, P: Vec2): Vec2 | null {
+  if (space === "E") {
+    const ab = { x: B.x - A.x, y: B.y - A.y };
+    const t = clamp(dot2({ x: P.x - A.x, y: P.y - A.y }, ab) / (dot2(ab, ab) || 1), 0, 1);
+    return { x: A.x + ab.x * t, y: A.y + ab.y * t };
+  }
+
+  let left = A;
+  let right = B;
+  let best: Vec2 | null = null;
+
+  for (let iter = 0; iter < 6; iter++) {
+    const pts = geodesicBetween(space, left, right, 720);
+    if (pts.length < 2) break;
+
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < pts.length; i++) {
+      const d = distanceExact(space, P, pts[i]);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+
+    best = pts[bestIdx];
+    const lo = Math.max(0, bestIdx - 1);
+    const hi = Math.min(pts.length - 1, bestIdx + 1);
+    if (lo === hi) break;
+
+    left = pts[lo];
+    right = pts[hi];
+  }
+
+  return best;
+}
+
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
   if (space === "S") {
     // spherical angle at B via tangents in tangent plane at B
@@ -486,7 +523,6 @@ export default function App() {
 
   /* UI params */
   const [animSpeed, setAnimSpeed] = useState(0.9);
-  const [canvasTextScale, setCanvasTextScale] = useState(1);
 
   /* sphere display toggle */
   const [sphereInDegrees, setSphereInDegrees] = useState(true);
@@ -507,6 +543,120 @@ export default function App() {
 
   const [angleDeg, setAngleDeg] = useState(60);
   const [showAngles, setShowAngles] = useState(false);
+
+  // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
+  // (L’utilisateur peut décocher / recocher pour recalculer.)
+  useEffect(() => {
+    if (!showLengths) return;
+
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const vp = makeViewport(canvas.width, canvas.height, 1.25);
+
+    const rects: { x1: number; y1: number; x2: number; y2: number }[] = [];
+    const nextPos: Record<string, Vec2> = {};
+
+    const rectIntersects = (a: any, b: any) =>
+      !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
+
+    const distPointToSegScreen = (p: Vec2, a: Vec2, b: Vec2) => {
+      const abx = b.x - a.x, aby = b.y - a.y;
+      const apx = p.x - a.x, apy = p.y - a.y;
+      const ab2 = abx * abx + aby * aby;
+      if (ab2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
+      let t = (apx * abx + apy * aby) / ab2;
+      t = clamp(t, 0, 1);
+      const q = { x: a.x + t * abx, y: a.y + t * aby };
+      return Math.hypot(p.x - q.x, p.y - q.y);
+    };
+
+    // Pré-calcule toutes les polylines segments (en coordonnées écran) pour tester les collisions.
+    const segPolysScreen = segments.map((S) => S.poly.map((pt) => worldToScreen(vp, pt)));
+
+    const minDistToAnySegmentPx = (pScreen: Vec2) => {
+      let best = Infinity;
+      for (const poly of segPolysScreen) {
+        for (let i = 0; i < poly.length - 1; i++) {
+          const d = distPointToSegScreen(pScreen, poly[i], poly[i + 1]);
+          if (d < best) best = d;
+        }
+      }
+      return best;
+    };
+
+    // options candidates
+    const offs = [0.06, -0.06, 0.10, -0.10, 0.14, -0.14, 0.18, -0.18, 0.22, -0.22];
+    const shifts = [0, 0.05, -0.05, 0.10, -0.10];
+
+    // même police que dans drawSegmentLabel
+    ctx.font = "14px ui-sans-serif, system-ui";
+
+    for (let si = 0; si < segments.length; si++) {
+      const S = segments[si];
+
+      // texte (approx) pour les dimensions
+      const d = distanceExact(space, S.a, S.b);
+      const textAB = `${S.A}${S.B}`;
+      const text = `${textAB} = ${formatDistance(d)}`;
+      const w = ctx.measureText(text).width;
+      const h = 18; // approx
+
+      const midIdx = Math.floor(S.poly.length / 2);
+      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+
+      // tangente locale (si possible)
+      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
+      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
+      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
+      const ndir = perp2(tdir);
+
+      let bestCandidate: { pos: Vec2; cost: number } | null = null;
+
+      for (const o of offs) {
+        for (const sh of shifts) {
+          const posW = { x: mid.x + ndir.x * o + tdir.x * sh, y: mid.y + ndir.y * o + tdir.y * sh };
+          if (!isValidWorldPoint(posW)) continue;
+
+          const s = worldToScreen(vp, posW);
+
+          // bounding box (left aligned, middle baseline)
+          const pad = 6;
+          const r = { x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad };
+
+          // hors-cadre => pénalité
+          let cost = 0;
+          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 5;
+
+          // chevauchement avec autres labels
+          for (const rr of rects) {
+            if (rectIntersects(r, rr)) cost += 10;
+          }
+
+          // trop près d’un segment
+          const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
+          const dseg = minDistToAnySegmentPx(center);
+          if (dseg < 14) cost += (14 - dseg) / 2;
+
+          if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
+          if (cost === 0) break;
+        }
+        if (bestCandidate && bestCandidate.cost === 0) break;
+      }
+
+      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.045, y: mid.y + ndir.y * 0.045 };
+      nextPos[S.id] = chosen;
+
+      // enregistrer rect final pour éviter chevauchement
+      const s = worldToScreen(vp, chosen);
+      const pad = 6;
+      rects.push({ x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad });
+    }
+
+    setLenLabelPos(nextPos);
+  }, [showLengths]);
 
   /* HUD */
   const [hudText, setHudText] = useState<string>("");
@@ -550,127 +700,6 @@ export default function App() {
     }
     return `${d.toFixed(2)} cm`;
   };
-
-
-  const canvasFontPx = (base: number) => Math.max(10, Math.round(base * canvasTextScale));
-  const canvasSansFont = (base: number) => `${canvasFontPx(base)}px ui-sans-serif, system-ui`;
-  const canvasSerifFont = (base: number) => `${canvasFontPx(base)}px serif`;
-
-  // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
-  // (L’utilisateur peut décocher / recocher pour recalculer.)
-  useEffect(() => {
-    if (!showLengths) return;
-
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const vp = makeViewport(canvas.width, canvas.height, 1.25);
-
-    const rects: { x1: number; y1: number; x2: number; y2: number }[] = [];
-    const nextPos: Record<string, Vec2> = {};
-
-    const rectIntersects = (a: any, b: any) =>
-      !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
-
-    const distPointToSegScreen = (p: Vec2, a: Vec2, b: Vec2) => {
-      const abx = b.x - a.x,
-        aby = b.y - a.y;
-      const apx = p.x - a.x,
-        apy = p.y - a.y;
-      const ab2 = abx * abx + aby * aby;
-      if (ab2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
-      let t = (apx * abx + apy * aby) / ab2;
-      t = clamp(t, 0, 1);
-      const q = { x: a.x + t * abx, y: a.y + t * aby };
-      return Math.hypot(p.x - q.x, p.y - q.y);
-    };
-
-    const segPolysScreen = segments.map((S) => S.poly.map((pt) => worldToScreen(vp, pt)));
-
-    const minDistToAnySegmentPx = (pScreen: Vec2) => {
-      let best = Infinity;
-      for (const poly of segPolysScreen) {
-        for (let i = 0; i < poly.length - 1; i++) {
-          const d = distPointToSegScreen(pScreen, poly[i], poly[i + 1]);
-          if (d < best) best = d;
-        }
-      }
-      return best;
-    };
-
-    const offs = [0.09, -0.09, 0.14, -0.14, 0.2, -0.2, 0.27, -0.27];
-    const shifts = [0, 0.08, -0.08, 0.16, -0.16];
-
-    ctx.font = canvasSansFont(13);
-
-    for (let si = 0; si < segments.length; si++) {
-      const S = segments[si];
-      const d = distanceExact(space, S.a, S.b);
-      const textAB = `${S.A}${S.B}`;
-      const textRest = ` = ${formatDistance(d)}`;
-      const totalW = ctx.measureText(textAB).width + ctx.measureText(textRest).width;
-      const h = canvasFontPx(13) + 3;
-
-      const midIdx = Math.floor(S.poly.length / 2);
-      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
-
-      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
-      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
-      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
-      const ndir = perp2(tdir);
-
-      let bestCandidate: { pos: Vec2; cost: number } | null = null;
-
-      for (const o of offs) {
-        for (const sh of shifts) {
-          const posW = { x: mid.x + ndir.x * o + tdir.x * sh, y: mid.y + ndir.y * o + tdir.y * sh };
-          if (!isValidWorldPoint(posW)) continue;
-
-          const s = worldToScreen(vp, posW);
-          const padX = Math.round(8 * canvasTextScale);
-          const padY = Math.round(5 * canvasTextScale);
-          const r = {
-            x1: s.x - totalW / 2 - padX,
-            y1: s.y - h / 2 - padY,
-            x2: s.x + totalW / 2 + padX,
-            y2: s.y + h / 2 + padY,
-          };
-
-          let cost = 0;
-          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 5;
-
-          for (const rr of rects) {
-            if (rectIntersects(r, rr)) cost += 10;
-          }
-
-          const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
-          const dseg = minDistToAnySegmentPx(center);
-          if (dseg < 20) cost += 20 - dseg;
-
-          if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
-          if (cost === 0) break;
-        }
-        if (bestCandidate && bestCandidate.cost === 0) break;
-      }
-
-      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.09, y: mid.y + ndir.y * 0.09 };
-      nextPos[S.id] = chosen;
-
-      const s = worldToScreen(vp, chosen);
-      const padX = Math.round(8 * canvasTextScale);
-      const padY = Math.round(5 * canvasTextScale);
-      rects.push({
-        x1: s.x - totalW / 2 - padX,
-        y1: s.y - h / 2 - padY,
-        x2: s.x + totalW / 2 + padX,
-        y2: s.y + h / 2 + padY,
-      });
-    }
-
-    setLenLabelPos(nextPos);
-  }, [showLengths, segments, space, sphereInDegrees, canvasTextScale]);
 
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
@@ -1475,10 +1504,7 @@ export default function App() {
       startPointSession(3, allowCreate, "Hauteur : sélectionne 3 points (A, B, C). La hauteur sera issue de C sur (AB).", (pts) => {
         speakThen(() => {
           const [A, B, C] = pts;
-          // Euclidean foot of perpendicular from C to line AB (in model coords)
-          const ab = { x: B.p.x - A.p.x, y: B.p.y - A.p.y };
-          const t = dot2({ x: C.p.x - A.p.x, y: C.p.y - A.p.y }, ab) / (dot2(ab, ab) || 1);
-          const Fp = { x: A.p.x + ab.x * t, y: A.p.y + ab.y * t };
+          const Fp = closestPointOnGeodesicSegment(space, A.p, B.p, C.p);
           if (!isValidWorldPoint(Fp)) {
             setHudText("Hauteur impossible à cet endroit.");
             return;
@@ -1715,7 +1741,7 @@ export default function App() {
       if (st.space !== "H" && st.space !== "S") return;
       const c = worldToScreen(vp, { x: 0, y: 0 });
       ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = Math.max(1.5, 2 * canvasTextScale);
+      ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.arc(c.x, c.y, vp.scale * 1.0, 0, Math.PI * 2);
       ctx.stroke();
@@ -1779,55 +1805,39 @@ export default function App() {
       ctx.fill();
 
       ctx.fillStyle = "#0f172a";
-      ctx.font = canvasSansFont(11);
+      ctx.font = "12px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
-      const labelOffset = Math.round(8 * canvasTextScale);
-      ctx.fillText(label, s.x + labelOffset, s.y - labelOffset);
+      ctx.fillText(label, s.x + 10, s.y - 10);
     };
 
     const drawSegmentLabel = (S: SegmentMeta) => {
-      const midIdx = Math.floor(S.poly.length / 2);
-      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
+      const n = perp2(u);
+      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
 
-      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
-      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
-      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
-      const ndir = perp2(tdir);
-
-      const pos = lenLabelPos[S.id] ?? { x: mid.x + ndir.x * 0.09, y: mid.y + ndir.y * 0.09 };
       const s = worldToScreen(vp, pos);
 
       const d = distanceExact(space, S.a, S.b);
       const textAB = `${S.A}${S.B}`;
-      const textRest = ` = ${formatDistance(d)}`;
+      const text = `${textAB} = ${formatDistance(d)}`;
 
       ctx.save();
-      ctx.font = canvasSansFont(13);
+      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.fillStyle = "#0f172a";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
+      ctx.fillText(text, s.x, s.y);
+
+      // Draw overline over AB
       const wAB = ctx.measureText(textAB).width;
-      const wRest = ctx.measureText(textRest).width;
-      const totalW = wAB + wRest;
-      const startX = s.x - totalW / 2;
-      const boxH = canvasFontPx(13) + 3;
-      const padX = Math.round(8 * canvasTextScale);
-      const padY = Math.round(5 * canvasTextScale);
-      const overlineY = s.y - boxH / 2 - Math.max(2, Math.round(2 * canvasTextScale));
-
-      ctx.fillStyle = "rgba(255,255,255,0.92)";
-      ctx.fillRect(startX - padX, s.y - boxH / 2 - padY, totalW + 2 * padX, boxH + 2 * padY);
-
-      ctx.fillStyle = "#0f172a";
-      ctx.fillText(textAB, startX, s.y);
-      ctx.fillText(textRest, startX + wAB, s.y);
-
       ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = Math.max(1.25, 1.25 * canvasTextScale);
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(startX, overlineY);
-      ctx.lineTo(startX + wAB, overlineY);
+      ctx.moveTo(s.x, s.y - 10);
+      ctx.lineTo(s.x + wAB, s.y - 10);
       ctx.stroke();
 
       ctx.restore();
@@ -1893,7 +1903,7 @@ export default function App() {
       if (showAngles) {
         // Triangle angles (one per vertex)
         ctx.save();
-        ctx.font = canvasSansFont(13);
+        ctx.font = "14px ui-sans-serif, system-ui";
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1942,7 +1952,7 @@ export default function App() {
         // 4 angles at line intersections
         const ints = computeLineIntersections();
         ctx.save();
-        ctx.font = canvasSansFont(13);
+        ctx.font = "13px ui-sans-serif, system-ui";
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1981,7 +1991,7 @@ export default function App() {
     const fw = frogWorldPos(st);
     const fp = worldToScreen(vp, fw);
 
-    ctx.font = canvasSerifFont(30);
+    ctx.font = "30px serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#0f172a";
@@ -1990,21 +2000,21 @@ export default function App() {
       // Frog speech bubble (simple)
     if (frogSpeech) {
       ctx.save();
-      ctx.font = canvasSansFont(14);
+      ctx.font = "14px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
-      const padX = Math.round(10 * canvasTextScale);
-      const padY = Math.round(8 * canvasTextScale);
+      const padX = 10;
+      const padY = 8;
       const textW = ctx.measureText(frogSpeech).width;
       const boxW = textW + padX * 2;
-      const boxH = Math.round(30 * canvasTextScale);
+      const boxH = 30;
 
       const bx = fp.x + 26;
       const by = fp.y - 52;
 
       // rounded rect
-      const r = Math.round(10 * canvasTextScale);
+      const r = 10;
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.strokeStyle = "#0f172a";
       ctx.lineWidth = 2;
@@ -2040,14 +2050,14 @@ export default function App() {
     // HUD overlay
     if (hudText) {
       ctx.save();
-      ctx.font = canvasSansFont(14);
+      ctx.font = "14px ui-sans-serif, system-ui";
       ctx.fillStyle = "rgba(15,23,42,0.75)";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
       ctx.fillText(hudText, 14, 14);
       ctx.restore();
     }
-  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees, canvasTextScale]);
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
 
   /* UI */
   const CANVAS_W = 1320;
@@ -2091,11 +2101,6 @@ export default function App() {
             <label>
               Animation : {animSpeed.toFixed(2)}
               <input type="range" min={0.4} max={2.0} step={0.05} value={animSpeed} onChange={(e) => setAnimSpeed(parseFloat(e.target.value))} />
-            </label>
-
-            <label>
-              Taille des textes du canvas : {Math.round(canvasTextScale * 100)}%
-              <input type="range" min={0.8} max={1.8} step={0.05} value={canvasTextScale} onChange={(e) => setCanvasTextScale(parseFloat(e.target.value))} />
             </label>
 
             <div className="card">
