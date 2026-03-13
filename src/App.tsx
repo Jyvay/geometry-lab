@@ -695,8 +695,7 @@ export default function App() {
   const formatDistance = (d: number) => {
     if (!isFinite(d)) return "∞";
     if (space === "S") {
-      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
-      return `${d.toFixed(3)} rad`;
+      return `${(d*10).toFixed(2)} cm`;
     }
     return `${d.toFixed(2)} cm`;
   };
@@ -2077,13 +2076,6 @@ export default function App() {
             <option value="H">Espace B</option>
             <option value="S">Espace C</option>
           </select>
-
-          {space === "S" && (
-            <label className="tiny">
-              <input type="checkbox" checked={sphereInDegrees} onChange={(e) => setSphereInDegrees(e.target.checked)} />
-              Afficher les longueurs sphériques en degrés (sinon radians)
-            </label>
-          )}
         </div>
       </header>
 
