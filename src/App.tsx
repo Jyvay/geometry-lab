@@ -362,43 +362,6 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
   return Math.acos(cos); // radians on unit sphere
 }
 
-function closestPointOnGeodesicSegment(space: SpaceId, A: Vec2, B: Vec2, P: Vec2): Vec2 | null {
-  if (space === "E") {
-    const ab = { x: B.x - A.x, y: B.y - A.y };
-    const t = clamp(dot2({ x: P.x - A.x, y: P.y - A.y }, ab) / (dot2(ab, ab) || 1), 0, 1);
-    return { x: A.x + ab.x * t, y: A.y + ab.y * t };
-  }
-
-  let left = A;
-  let right = B;
-  let best: Vec2 | null = null;
-
-  for (let iter = 0; iter < 6; iter++) {
-    const pts = geodesicBetween(space, left, right, 720);
-    if (pts.length < 2) break;
-
-    let bestIdx = 0;
-    let bestDist = Infinity;
-    for (let i = 0; i < pts.length; i++) {
-      const d = distanceExact(space, P, pts[i]);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
-    }
-
-    best = pts[bestIdx];
-    const lo = Math.max(0, bestIdx - 1);
-    const hi = Math.min(pts.length - 1, bestIdx + 1);
-    if (lo === hi) break;
-
-    left = pts[lo];
-    right = pts[hi];
-  }
-
-  return best;
-}
-
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
   if (space === "S") {
     // spherical angle at B via tangents in tangent plane at B
@@ -695,22 +658,39 @@ export default function App() {
   const formatDistance = (d: number) => {
     if (!isFinite(d)) return "∞";
     if (space === "S") {
-      return `${(d*10).toFixed(2)} cm`;
+      return `${(d * 10).toFixed(2)} cm`;
     }
     return `${d.toFixed(2)} cm`;
   };
 
+  const animateFrogHome = (onDone?: () => void) => {
+    const home = { x: 0, y: 0 };
+    const frog = frogWorldPos(stateRef.current);
+
+    if (dist2(frog, home) < 1e-10) {
+      onDone?.();
+      return;
+    }
+
+    stateRef.current = animatePath(stateRef.current, [frog, home], animSpeed, false);
+
+    if (!onDone) return;
+
+    const timer = window.setInterval(() => {
+      if (stateRef.current.anim.active) return;
+      window.clearInterval(timer);
+      onDone();
+    }, 25);
+  };
+
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
-    const txt = FROG_QUOTES[Math.floor(Math.random() * FROG_QUOTES.length)];
-    setFrogSpeech(txt);
-    if (frogSpeechTimerRef.current) window.clearTimeout(frogSpeechTimerRef.current);
-    frogSpeechTimerRef.current = window.setTimeout(() => setFrogSpeech(null), 1300);
-
-    window.setTimeout(() => {
-      // start after frog "speaks"
-      fn();
-    }, 950);
+    setFrogSpeech(null);
+    if (frogSpeechTimerRef.current) {
+      window.clearTimeout(frogSpeechTimerRef.current);
+      frogSpeechTimerRef.current = null;
+    }
+    fn();
   };
 
   /* (c) Correct cursor mapping under CSS scaling */
@@ -831,6 +811,7 @@ export default function App() {
               pushSnapshot({ lines: cloneAny(next) });
               return next;
             });
+            window.setTimeout(() => animateFrogHome(), 0);
           }
         }
       }
@@ -961,6 +942,7 @@ export default function App() {
         stateRef.current = finishTracing(stateRef.current);
         setRenderState(stateRef.current);
         onDone();
+        animateFrogHome();
       }, 25);
     }, 25);
   };
@@ -987,6 +969,7 @@ export default function App() {
         setRenderState(stateRef.current);
         window.clearInterval(timer);
         onDone();
+        animateFrogHome();
         return;
       }
 
@@ -1171,6 +1154,7 @@ export default function App() {
 
       pushSnapshot();
       setHudText("");
+      animateFrogHome();
       return;
     }
   };
@@ -1446,6 +1430,7 @@ export default function App() {
                   else createCircleMeta(O, P, R, tracePath);
 
                   pushSnapshot();
+                  animateFrogHome();
                 }, 25);
               }, 25);
             }, 25);
@@ -1503,7 +1488,10 @@ export default function App() {
       startPointSession(3, allowCreate, "Hauteur : sélectionne 3 points (A, B, C). La hauteur sera issue de C sur (AB).", (pts) => {
         speakThen(() => {
           const [A, B, C] = pts;
-          const Fp = closestPointOnGeodesicSegment(space, A.p, B.p, C.p);
+          // Euclidean foot of perpendicular from C to line AB (in model coords)
+          const ab = { x: B.p.x - A.p.x, y: B.p.y - A.p.y };
+          const t = dot2({ x: C.p.x - A.p.x, y: C.p.y - A.p.y }, ab) / (dot2(ab, ab) || 1);
+          const Fp = { x: A.p.x + ab.x * t, y: A.p.y + ab.y * t };
           if (!isValidWorldPoint(Fp)) {
             setHudText("Hauteur impossible à cet endroit.");
             return;
@@ -1616,6 +1604,7 @@ export default function App() {
               stateRef.current = finishTracing(stateRef.current);
               setRenderState(stateRef.current);
               pushSnapshot();
+              animateFrogHome();
             }, 25);
           }
         }, 25);
@@ -2076,6 +2065,8 @@ export default function App() {
             <option value="H">Espace B</option>
             <option value="S">Espace C</option>
           </select>
+
+          {space === "S" && <div className="tiny">Longueurs affichées comme arcs sur une sphère de rayon 10 cm.</div>}
         </div>
       </header>
 
