@@ -76,35 +76,22 @@ function distPointToSegment(p: Vec2, a: Vec2, b: Vec2) {
 const euclidLen = (a: Vec2, b: Vec2) => Math.hypot(b.x - a.x, b.y - a.y);
 const dot2 = (a: Vec2, b: Vec2) => a.x * b.x + a.y * b.y;
 const norm2 = (a: Vec2) => Math.hypot(a.x, a.y) || 1;
+const mobiusAdd = (a: Vec2, b: Vec2): Vec2 => {
+  const a2 = dot2(a, a);
+  const b2 = dot2(b, b);
+  const ab = dot2(a, b);
+  const denom = 1 + 2 * ab + a2 * b2;
+  return {
+    x: ((1 + 2 * ab + b2) * a.x + (1 - a2) * b.x) / denom,
+    y: ((1 + 2 * ab + b2) * a.y + (1 - a2) * b.y) / denom,
+  };
+};
 const normalize2 = (a: Vec2) => {
   const n = norm2(a);
   return { x: a.x / n, y: a.y / n };
 };
 const perp2 = (a: Vec2) => ({ x: -a.y, y: a.x });
 const cross2 = (a: Vec2, b: Vec2) => a.x * b.y - a.y * b.x;
-
-function pointAtHalfPolylineLength(pts: Vec2[]): Vec2 | null {
-  if (pts.length === 0) return null;
-  if (pts.length === 1) return pts[0];
-
-  let total = 0;
-  for (let i = 0; i < pts.length - 1; i++) total += euclidLen(pts[i], pts[i + 1]);
-  if (total <= 1e-12) return pts[Math.floor(pts.length / 2)] ?? pts[0];
-
-  const target = total / 2;
-  let acc = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    const a = pts[i], b = pts[i + 1];
-    const seg = euclidLen(a, b);
-    if (acc + seg >= target && seg > 1e-12) {
-      const t = (target - acc) / seg;
-      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-    }
-    acc += seg;
-  }
-
-  return pts[pts.length - 1];
-}
 
 function rotate2D(v: Vec2, deg: number) {
   const t = (deg * Math.PI) / 180;
@@ -383,6 +370,40 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
   const db = norm3(b) || 1;
   const cos = clamp(dot3(a, b) / (da * db), -1, 1);
   return Math.acos(cos); // radians on unit sphere
+}
+
+function geodesicMidpointExact(space: SpaceId, A: Vec2, B: Vec2): Vec2 {
+  if (space === "E") {
+    return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+  }
+
+  if (space === "H") {
+    const b0 = mobiusAdd({ x: -A.x, y: -A.y }, B);
+    const r = Math.hypot(b0.x, b0.y);
+    if (r < 1e-12) return A;
+
+    const u = { x: b0.x / r, y: b0.y / r };
+    const rr = Math.min(r, 0.999999);
+    const rho = Math.tanh(0.5 * Math.atanh(rr));
+    const m0 = { x: u.x * rho, y: u.y * rho };
+    const M = mobiusAdd(A, m0);
+    const m2 = M.x * M.x + M.y * M.y;
+    if (m2 >= 0.999999) {
+      const s = 0.999999 / Math.sqrt(m2);
+      return { x: M.x * s, y: M.y * s };
+    }
+    return M;
+  }
+
+  const a = liftSphereUpper(A);
+  const b = liftSphereUpper(B);
+  const sum = { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
+  const n = norm3(sum);
+  if (n < 1e-10) {
+    const pts = geodesicBetween(space, A, B, 800);
+    return pts[Math.floor(pts.length / 2)] ?? { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+  }
+  return { x: sum.x / n, y: sum.y / n };
 }
 
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
@@ -686,34 +707,17 @@ export default function App() {
     return `${d.toFixed(2)} cm`;
   };
 
-  const animateFrogHome = (onDone?: () => void) => {
-    const home = { x: 0, y: 0 };
-    const frog = frogWorldPos(stateRef.current);
-
-    if (dist2(frog, home) < 1e-10) {
-      onDone?.();
-      return;
-    }
-
-    stateRef.current = animatePath(stateRef.current, [frog, home], animSpeed, false);
-
-    if (!onDone) return;
-
-    const timer = window.setInterval(() => {
-      if (stateRef.current.anim.active) return;
-      window.clearInterval(timer);
-      onDone();
-    }, 25);
-  };
-
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
-    setFrogSpeech(null);
-    if (frogSpeechTimerRef.current) {
-      window.clearTimeout(frogSpeechTimerRef.current);
-      frogSpeechTimerRef.current = null;
-    }
-    fn();
+    const txt = FROG_QUOTES[Math.floor(Math.random() * FROG_QUOTES.length)];
+    setFrogSpeech(txt);
+    if (frogSpeechTimerRef.current) window.clearTimeout(frogSpeechTimerRef.current);
+    frogSpeechTimerRef.current = window.setTimeout(() => setFrogSpeech(null), 1300);
+
+    window.setTimeout(() => {
+      // start after frog "speaks"
+      fn();
+    }, 950);
   };
 
   /* (c) Correct cursor mapping under CSS scaling */
@@ -792,6 +796,9 @@ export default function App() {
     setRenderState(stateRef.current);
     setHudText("");
 
+    magicLineRef.current = null;
+    setLineOpSession(null);
+
     setPoints([]);
     setLines([]);
     setSegments([]);
@@ -834,7 +841,6 @@ export default function App() {
               pushSnapshot({ lines: cloneAny(next) });
               return next;
             });
-            window.setTimeout(() => animateFrogHome(), 0);
           }
         }
       }
@@ -918,6 +924,7 @@ export default function App() {
     const thr = 0.035;
     let best: { line: LineObject; d: number } | null = null;
     for (const L of linesRef.current) {
+      if (L.space !== space) continue;
       const pts = L.pts;
       for (let i = 0; i < pts.length - 1; i++) {
         const d = distPointToSegment(w, pts[i], pts[i + 1]);
@@ -965,7 +972,6 @@ export default function App() {
         stateRef.current = finishTracing(stateRef.current);
         setRenderState(stateRef.current);
         onDone();
-        animateFrogHome();
       }, 25);
     }, 25);
   };
@@ -992,7 +998,6 @@ export default function App() {
         setRenderState(stateRef.current);
         window.clearInterval(timer);
         onDone();
-        animateFrogHome();
         return;
       }
 
@@ -1154,8 +1159,8 @@ export default function App() {
       const S = pickSegmentMetaAt(w);
       if (!S) return;
 
-      // Create midpoint on the geodesic segment itself
-      const mid = pointAtHalfPolylineLength(S.poly) ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      // Create intrinsic midpoint on the geodesic segment
+      const mid = geodesicMidpointExact(space, S.a, S.b);
       if (!isValidWorldPoint(mid)) return;
 
       const M = createPoint(mid);
@@ -1177,7 +1182,6 @@ export default function App() {
 
       pushSnapshot();
       setHudText("");
-      animateFrogHome();
       return;
     }
   };
@@ -1453,7 +1457,6 @@ export default function App() {
                   else createCircleMeta(O, P, R, tracePath);
 
                   pushSnapshot();
-                  animateFrogHome();
                 }, 25);
               }, 25);
             }, 25);
@@ -1627,7 +1630,6 @@ export default function App() {
               stateRef.current = finishTracing(stateRef.current);
               setRenderState(stateRef.current);
               pushSnapshot();
-              animateFrogHome();
             }, 25);
           }
         }, 25);
@@ -1782,18 +1784,6 @@ export default function App() {
     const drawPolyline = (pts: Vec2[], color: string, width: number) => {
       if (pts.length < 2) return;
 
-      if (pts.length === 2) {
-        const A = worldToScreen(vp, pts[0]);
-        const B = worldToScreen(vp, pts[1]);
-        ctx.strokeStyle = color;
-        ctx.lineWidth = width;
-        ctx.beginPath();
-        ctx.moveTo(A.x, A.y);
-        ctx.lineTo(B.x, B.y);
-        ctx.stroke();
-        return;
-      }
-
       const JUMP = 0.35; // seuil en coords monde (à ajuster si besoin)
 
       ctx.strokeStyle = color;
@@ -1871,6 +1861,7 @@ export default function App() {
     withDiskClip(() => {
       // Custom geodesic lines
       for (const L of lines) {
+        if (L.space !== space) continue;
         // Si on est en sphérique et qu’on a z[], on dessine plein/pointillé selon z
         if (space === "S" && (L as any).z) {
           drawPolylineZ(L.pts, (L as any).z, "#0f172a", 3);
@@ -2101,7 +2092,12 @@ export default function App() {
             <option value="S">Espace C</option>
           </select>
 
-          {space === "S" && <div className="tiny">Longueurs affichées comme arcs sur une sphère de rayon 10 cm.</div>}
+          {space === "S" && (
+            <label className="tiny">
+              <input type="checkbox" checked={sphereInDegrees} onChange={(e) => setSphereInDegrees(e.target.checked)} />
+              Afficher les longueurs sphériques en degrés (sinon radians)
+            </label>
+          )}
         </div>
       </header>
 
