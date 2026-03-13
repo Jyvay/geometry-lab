@@ -486,6 +486,7 @@ export default function App() {
 
   /* UI params */
   const [animSpeed, setAnimSpeed] = useState(0.9);
+  const [canvasTextScale, setCanvasTextScale] = useState(1);
 
   /* sphere display toggle */
   const [sphereInDegrees, setSphereInDegrees] = useState(true);
@@ -533,6 +534,28 @@ export default function App() {
   useEffect(() => void (circlesRef.current = circles), [circles]);
   useEffect(() => void (trianglesRef.current = triangles), [triangles]);
 
+  const formula = useMemo(() => spaceFormula(space), [space]);
+
+  const isValidWorldPoint = (w: Vec2) => {
+    if (space === "H") return w.x * w.x + w.y * w.y < 1;
+    if (space === "S") return w.x * w.x + w.y * w.y <= 1;
+    return true;
+  };
+
+  const formatDistance = (d: number) => {
+    if (!isFinite(d)) return "∞";
+    if (space === "S") {
+      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
+      return `${d.toFixed(3)} rad`;
+    }
+    return `${d.toFixed(2)} cm`;
+  };
+
+
+  const canvasFontPx = (base: number) => Math.max(10, Math.round(base * canvasTextScale));
+  const canvasSansFont = (base: number) => `${canvasFontPx(base)}px ui-sans-serif, system-ui`;
+  const canvasSerifFont = (base: number) => `${canvasFontPx(base)}px serif`;
+
   // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
   // (L’utilisateur peut décocher / recocher pour recalculer.)
   useEffect(() => {
@@ -552,8 +575,10 @@ export default function App() {
       !(a.x2 < b.x1 || a.x1 > b.x2 || a.y2 < b.y1 || a.y1 > b.y2);
 
     const distPointToSegScreen = (p: Vec2, a: Vec2, b: Vec2) => {
-      const abx = b.x - a.x, aby = b.y - a.y;
-      const apx = p.x - a.x, apy = p.y - a.y;
+      const abx = b.x - a.x,
+        aby = b.y - a.y;
+      const apx = p.x - a.x,
+        apy = p.y - a.y;
       const ab2 = abx * abx + aby * aby;
       if (ab2 === 0) return Math.hypot(p.x - a.x, p.y - a.y);
       let t = (apx * abx + apy * aby) / ab2;
@@ -575,19 +600,18 @@ export default function App() {
       return best;
     };
 
-    const offs = [0.09, -0.09, 0.14, -0.14, 0.20, -0.20, 0.27, -0.27];
+    const offs = [0.09, -0.09, 0.14, -0.14, 0.2, -0.2, 0.27, -0.27];
     const shifts = [0, 0.08, -0.08, 0.16, -0.16];
 
-    ctx.font = "13px ui-sans-serif, system-ui";
+    ctx.font = canvasSansFont(13);
 
     for (let si = 0; si < segments.length; si++) {
       const S = segments[si];
-
       const d = distanceExact(space, S.a, S.b);
       const textAB = `${S.A}${S.B}`;
-      const text = `${textAB} = ${formatDistance(d)}`;
-      const w = ctx.measureText(text).width;
-      const h = 16;
+      const textRest = ` = ${formatDistance(d)}`;
+      const totalW = ctx.measureText(textAB).width + ctx.measureText(textRest).width;
+      const h = canvasFontPx(13) + 3;
 
       const midIdx = Math.floor(S.poly.length / 2);
       const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
@@ -605,13 +629,12 @@ export default function App() {
           if (!isValidWorldPoint(posW)) continue;
 
           const s = worldToScreen(vp, posW);
-
-          const padX = 8;
-          const padY = 5;
+          const padX = Math.round(8 * canvasTextScale);
+          const padY = Math.round(5 * canvasTextScale);
           const r = {
-            x1: s.x - w / 2 - padX,
+            x1: s.x - totalW / 2 - padX,
             y1: s.y - h / 2 - padY,
-            x2: s.x + w / 2 + padX,
+            x2: s.x + totalW / 2 + padX,
             y2: s.y + h / 2 + padY,
           };
 
@@ -624,7 +647,7 @@ export default function App() {
 
           const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
           const dseg = minDistToAnySegmentPx(center);
-          if (dseg < 20) cost += (20 - dseg);
+          if (dseg < 20) cost += 20 - dseg;
 
           if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
           if (cost === 0) break;
@@ -636,36 +659,18 @@ export default function App() {
       nextPos[S.id] = chosen;
 
       const s = worldToScreen(vp, chosen);
-      const padX = 8;
-      const padY = 5;
+      const padX = Math.round(8 * canvasTextScale);
+      const padY = Math.round(5 * canvasTextScale);
       rects.push({
-        x1: s.x - w / 2 - padX,
+        x1: s.x - totalW / 2 - padX,
         y1: s.y - h / 2 - padY,
-        x2: s.x + w / 2 + padX,
+        x2: s.x + totalW / 2 + padX,
         y2: s.y + h / 2 + padY,
       });
     }
 
     setLenLabelPos(nextPos);
-  }, [showLengths, segments, space, sphereInDegrees]);
-
-
-  const formula = useMemo(() => spaceFormula(space), [space]);
-
-  const isValidWorldPoint = (w: Vec2) => {
-    if (space === "H") return w.x * w.x + w.y * w.y < 1;
-    if (space === "S") return w.x * w.x + w.y * w.y <= 1;
-    return true;
-  };
-
-  const formatDistance = (d: number) => {
-    if (!isFinite(d)) return "∞";
-    if (space === "S") {
-      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
-      return `${d.toFixed(3)} rad`;
-    }
-    return `${d.toFixed(2)} cm`;
-  };
+  }, [showLengths, segments, space, sphereInDegrees, canvasTextScale]);
 
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
@@ -1710,7 +1715,7 @@ export default function App() {
       if (st.space !== "H" && st.space !== "S") return;
       const c = worldToScreen(vp, { x: 0, y: 0 });
       ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = 2;
+      ctx.lineWidth = Math.max(1.5, 2 * canvasTextScale);
       ctx.beginPath();
       ctx.arc(c.x, c.y, vp.scale * 1.0, 0, Math.PI * 2);
       ctx.stroke();
@@ -1774,10 +1779,11 @@ export default function App() {
       ctx.fill();
 
       ctx.fillStyle = "#0f172a";
-      ctx.font = "11px ui-sans-serif, system-ui";
+      ctx.font = canvasSansFont(11);
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
-      ctx.fillText(label, s.x + 8, s.y - 8);
+      const labelOffset = Math.round(8 * canvasTextScale);
+      ctx.fillText(label, s.x + labelOffset, s.y - labelOffset);
     };
 
     const drawSegmentLabel = (S: SegmentMeta) => {
@@ -1794,30 +1800,34 @@ export default function App() {
 
       const d = distanceExact(space, S.a, S.b);
       const textAB = `${S.A}${S.B}`;
-      const text = `${textAB} = ${formatDistance(d)}`;
+      const textRest = ` = ${formatDistance(d)}`;
 
       ctx.save();
-      ctx.font = "13px ui-sans-serif, system-ui";
-      ctx.textAlign = "center";
+      ctx.font = canvasSansFont(13);
+      ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
-      const w = ctx.measureText(text).width;
       const wAB = ctx.measureText(textAB).width;
-      const boxH = 16;
-      const padX = 8;
-      const padY = 5;
+      const wRest = ctx.measureText(textRest).width;
+      const totalW = wAB + wRest;
+      const startX = s.x - totalW / 2;
+      const boxH = canvasFontPx(13) + 3;
+      const padX = Math.round(8 * canvasTextScale);
+      const padY = Math.round(5 * canvasTextScale);
+      const overlineY = s.y - boxH / 2 - Math.max(2, Math.round(2 * canvasTextScale));
 
       ctx.fillStyle = "rgba(255,255,255,0.92)";
-      ctx.fillRect(s.x - w / 2 - padX, s.y - boxH / 2 - padY, w + 2 * padX, boxH + 2 * padY);
+      ctx.fillRect(startX - padX, s.y - boxH / 2 - padY, totalW + 2 * padX, boxH + 2 * padY);
 
       ctx.fillStyle = "#0f172a";
-      ctx.fillText(text, s.x, s.y);
+      ctx.fillText(textAB, startX, s.y);
+      ctx.fillText(textRest, startX + wAB, s.y);
 
       ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = 1.25;
+      ctx.lineWidth = Math.max(1.25, 1.25 * canvasTextScale);
       ctx.beginPath();
-      ctx.moveTo(s.x - wAB / 2, s.y - 9);
-      ctx.lineTo(s.x + wAB / 2, s.y - 9);
+      ctx.moveTo(startX, overlineY);
+      ctx.lineTo(startX + wAB, overlineY);
       ctx.stroke();
 
       ctx.restore();
@@ -1883,7 +1893,7 @@ export default function App() {
       if (showAngles) {
         // Triangle angles (one per vertex)
         ctx.save();
-        ctx.font = "14px ui-sans-serif, system-ui";
+        ctx.font = canvasSansFont(13);
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1932,7 +1942,7 @@ export default function App() {
         // 4 angles at line intersections
         const ints = computeLineIntersections();
         ctx.save();
-        ctx.font = "13px ui-sans-serif, system-ui";
+        ctx.font = canvasSansFont(13);
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -1971,7 +1981,7 @@ export default function App() {
     const fw = frogWorldPos(st);
     const fp = worldToScreen(vp, fw);
 
-    ctx.font = "30px serif";
+    ctx.font = canvasSerifFont(30);
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillStyle = "#0f172a";
@@ -1980,21 +1990,21 @@ export default function App() {
       // Frog speech bubble (simple)
     if (frogSpeech) {
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.font = canvasSansFont(14);
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
-      const padX = 10;
-      const padY = 8;
+      const padX = Math.round(10 * canvasTextScale);
+      const padY = Math.round(8 * canvasTextScale);
       const textW = ctx.measureText(frogSpeech).width;
       const boxW = textW + padX * 2;
-      const boxH = 30;
+      const boxH = Math.round(30 * canvasTextScale);
 
       const bx = fp.x + 26;
       const by = fp.y - 52;
 
       // rounded rect
-      const r = 10;
+      const r = Math.round(10 * canvasTextScale);
       ctx.fillStyle = "rgba(255,255,255,0.95)";
       ctx.strokeStyle = "#0f172a";
       ctx.lineWidth = 2;
@@ -2030,14 +2040,14 @@ export default function App() {
     // HUD overlay
     if (hudText) {
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.font = canvasSansFont(14);
       ctx.fillStyle = "rgba(15,23,42,0.75)";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
       ctx.fillText(hudText, 14, 14);
       ctx.restore();
     }
-  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees, canvasTextScale]);
 
   /* UI */
   const CANVAS_W = 1320;
@@ -2081,6 +2091,11 @@ export default function App() {
             <label>
               Animation : {animSpeed.toFixed(2)}
               <input type="range" min={0.4} max={2.0} step={0.05} value={animSpeed} onChange={(e) => setAnimSpeed(parseFloat(e.target.value))} />
+            </label>
+
+            <label>
+              Taille des textes du canvas : {Math.round(canvasTextScale * 100)}%
+              <input type="range" min={0.8} max={1.8} step={0.05} value={canvasTextScale} onChange={(e) => setCanvasTextScale(parseFloat(e.target.value))} />
             </label>
 
             <div className="card">
