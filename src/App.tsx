@@ -83,6 +83,29 @@ const normalize2 = (a: Vec2) => {
 const perp2 = (a: Vec2) => ({ x: -a.y, y: a.x });
 const cross2 = (a: Vec2, b: Vec2) => a.x * b.y - a.y * b.x;
 
+function pointAtHalfPolylineLength(pts: Vec2[]): Vec2 | null {
+  if (pts.length === 0) return null;
+  if (pts.length === 1) return pts[0];
+
+  let total = 0;
+  for (let i = 0; i < pts.length - 1; i++) total += euclidLen(pts[i], pts[i + 1]);
+  if (total <= 1e-12) return pts[Math.floor(pts.length / 2)] ?? pts[0];
+
+  const target = total / 2;
+  let acc = 0;
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const seg = euclidLen(a, b);
+    if (acc + seg >= target && seg > 1e-12) {
+      const t = (target - acc) / seg;
+      return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+    }
+    acc += seg;
+  }
+
+  return pts[pts.length - 1];
+}
+
 function rotate2D(v: Vec2, deg: number) {
   const t = (deg * Math.PI) / 180;
   const c = Math.cos(t),
@@ -1131,8 +1154,8 @@ export default function App() {
       const S = pickSegmentMetaAt(w);
       if (!S) return;
 
-      // Create midpoint
-      const mid = { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      // Create midpoint on the geodesic segment itself
+      const mid = pointAtHalfPolylineLength(S.poly) ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
       if (!isValidWorldPoint(mid)) return;
 
       const M = createPoint(mid);
@@ -1758,6 +1781,18 @@ export default function App() {
 
     const drawPolyline = (pts: Vec2[], color: string, width: number) => {
       if (pts.length < 2) return;
+
+      if (pts.length === 2) {
+        const A = worldToScreen(vp, pts[0]);
+        const B = worldToScreen(vp, pts[1]);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
+        ctx.stroke();
+        return;
+      }
 
       const JUMP = 0.35; // seuil en coords monde (à ajuster si besoin)
 
