@@ -362,6 +362,39 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
   return Math.acos(cos); // radians on unit sphere
 }
 
+
+function geodesicMidpointExact(space: SpaceId, A: Vec2, B: Vec2): Vec2 {
+  if (space === "E") {
+    return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+  }
+
+  if (space === "S") {
+    const a3 = normalize3v(liftSphereUpper(A));
+    const b3 = normalize3v(liftSphereUpper(B));
+    const s = { x: a3.x + b3.x, y: a3.y + b3.y, z: a3.z + b3.z };
+    const n = norm3(s);
+    if (n < 1e-10) return A;
+    const m = { x: s.x / n, y: s.y / n, z: s.z / n };
+    return { x: m.x, y: m.y };
+  }
+
+  const p = A;
+  const q = B;
+  const one: Cpx = { x: 1, y: 0 };
+  const pC: Cpx = p;
+  const qC: Cpx = q;
+
+  const qPrime = cDiv(cSub(qC, pC), cSub(one, cMul(cConj(pC), qC)));
+  const r = Math.sqrt(cAbs2(qPrime));
+  if (r < 1e-12) return A;
+
+  const rm = Math.tanh(0.5 * Math.atanh(Math.min(r, 0.999999999)));
+  const mPrime: Cpx = { x: (qPrime.x / r) * rm, y: (qPrime.y / r) * rm };
+  const denom = cAdd(one, cMul(cConj(pC), mPrime));
+  const m = cDiv(cAdd(pC, mPrime), denom);
+  return { x: m.x, y: m.y };
+}
+
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
   if (space === "S") {
     // spherical angle at B via tangents in tangent plane at B
@@ -1129,7 +1162,7 @@ export default function App() {
       if (!S) return;
 
       // Create midpoint
-      const mid = { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      const mid = geodesicMidpointExact(space, S.a, S.b);
       if (!isValidWorldPoint(mid)) return;
 
       const M = createPoint(mid);
