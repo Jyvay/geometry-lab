@@ -775,6 +775,7 @@ export default function App() {
     setTriangles([]);
     setHudText("");
     historyRef.current = [];
+    magicLineRef.current = null;
     pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
   };
 
@@ -783,7 +784,8 @@ export default function App() {
     stateRef.current = reset(stateRef.current, space);
     setRenderState(stateRef.current);
     setHudText("");
-
+    
+    magicLineRef.current = null;
     setPoints([]);
     setLines([]);
     setSegments([]);
@@ -1659,19 +1661,6 @@ export default function App() {
 
     const dedupThr2 = 0.0009;
 
-    const add = (p: Vec2, u1: Vec2, u2: Vec2) => {
-      // dedup
-      if (res.some((x) => dist2(x.p, p) < dedupThr2)) return;
-      // approximate tangent points for spherical angle
-      const eps = 0.02;
-      const A = { x: p.x + u1.x * eps, y: p.y + u1.y * eps };
-      const C = { x: p.x + u2.x * eps, y: p.y + u2.y * eps };
-      const ang = angleHand(space, A, p, C);
-      const thetaDeg = (ang * 180) / Math.PI;
-      res.push({ p, u1, u2, thetaDeg });
-    };
-
-    // segment-segment intersection in 2D
     const segIntersect = (a: Vec2, b: Vec2, c: Vec2, d: Vec2) => {
       const r = { x: b.x - a.x, y: b.y - a.y };
       const s = { x: d.x - c.x, y: d.y - c.y };
@@ -1679,7 +1668,7 @@ export default function App() {
       const q_p = { x: c.x - a.x, y: c.y - a.y };
       const qpxr = cross2(q_p, r);
 
-      if (Math.abs(rxs) < 1e-10) return null; // parallel
+      if (Math.abs(rxs) < 1e-10) return null;
       const t = cross2(q_p, s) / rxs;
       const u = qpxr / rxs;
 
@@ -1689,20 +1678,176 @@ export default function App() {
       return null;
     };
 
+    const exactEuclideanIntersection = (L1: LineObject, L2: LineObject) => {
+      const a = L1.baseP;
+      const b = L1.baseQ;
+      const c = L2.baseP;
+      const d = L2.baseQ;
+      const r = { x: b.x - a.x, y: b.y - a.y };
+      const s = { x: d.x - c.x, y: d.y - c.y };
+      const rxs = cross2(r, s);
+      if (Math.abs(rxs) < 1e-10) return null;
+      const q_p = { x: c.x - a.x, y: c.y - a.y };
+      const t = cross2(q_p, s) / rxs;
+      return { x: a.x + t * r.x, y: a.y + t * r.y };
+    };
+
+    const lineCircleIntersections = (A: Vec2, B: Vec2, c: Vec2, r: number) => {
+      const d = { x: B.x - A.x, y: B.y - A.y };
+      const f = { x: A.x - c.x, y: A.y - c.y };
+      const aa = dot2(d, d);
+      const bb = 2 * dot2(f, d);
+      const cc = dot2(f, f) - r * r;
+      const disc = bb * bb - 4 * aa * cc;
+      if (disc < -1e-10 || aa < 1e-12) return [] as Vec2[];
+      const safeDisc = Math.max(0, disc);
+      const s = Math.sqrt(safeDisc);
+      const t1 = (-bb - s) / (2 * aa);
+      const t2 = (-bb + s) / (2 * aa);
+      return [
+        { x: A.x + t1 * d.x, y: A.y + t1 * d.y },
+        { x: A.x + t2 * d.x, y: A.y + t2 * d.y },
+      ];
+    };
+
+    const circleCircleIntersections = (c1: Vec2, r1: number, c2: Vec2, r2: number) => {
+      const dx = c2.x - c1.x;
+      const dy = c2.y - c1.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 1e-12) return [] as Vec2[];
+      if (d > r1 + r2 + 1e-10) return [] as Vec2[];
+      if (d < Math.abs(r1 - r2) - 1e-10) return [] as Vec2[];
+
+      const a = (r1 * r1 - r2 * r2 + d * d) / (2 * d);
+      const h2 = r1 * r1 - a * a;
+      if (h2 < -1e-10) return [] as Vec2[];
+      const h = Math.sqrt(Math.max(0, h2));
+
+      const xm = c1.x + (a * dx) / d;
+      const ym = c1.y + (a * dy) / d;
+      const rx = (-dy * h) / d;
+      const ry = (dx * h) / d;
+
+      return [
+        { x: xm + rx, y: ym + ry },
+        { x: xm - rx, y: ym - ry },
+      ];
+    };
+
+    const exactHyperbolicIntersection = (L1: LineObject, L2: LineObject, hint: Vec2) => {
+      const c1 = hyperbolicGeodesicCircleCenter(L1.baseP, L1.baseQ);
+      const c2 = hyperbolicGeodesicCircleCenter(L2.baseP, L2.baseQ);
+
+      let candidates: Vec2[] = [];
+
+      if (!c1 && !c2) {
+        const p = exactEuclideanIntersection(L1, L2);
+        candidates = p ? [p] : [];
+      } else if (!c1 && c2) {
+        const r2 = Math.sqrt(Math.max(0, dot2(c2, c2) - 1));
+        candidates = lineCircleIntersections(L1.baseP, L1.baseQ, c2, r2);
+      } else if (c1 && !c2) {
+        const r1 = Math.sqrt(Math.max(0, dot2(c1, c1) - 1));
+        candidates = lineCircleIntersections(L2.baseP, L2.baseQ, c1, r1);
+      } else if (c1 && c2) {
+        const r1 = Math.sqrt(Math.max(0, dot2(c1, c1) - 1));
+        const r2 = Math.sqrt(Math.max(0, dot2(c2, c2) - 1));
+        candidates = circleCircleIntersections(c1, r1, c2, r2);
+      }
+
+      candidates = candidates.filter((p) => p.x * p.x + p.y * p.y < 1 - 1e-8);
+      if (!candidates.length) return null;
+
+      candidates.sort((a, b) => dist2(a, hint) - dist2(b, hint));
+      return candidates[0];
+    };
+
+    const exactSphericalIntersection = (L1: LineObject, L2: LineObject, hint: Vec2) => {
+      const A1 = normalize3v(liftSphereUpper(L1.baseP));
+      const B1 = normalize3v(liftSphereUpper(L1.baseQ));
+      const A2 = normalize3v(liftSphereUpper(L2.baseP));
+      const B2 = normalize3v(liftSphereUpper(L2.baseQ));
+
+      let n1 = cross3(A1, B1);
+      let n2 = cross3(A2, B2);
+      if (norm3(n1) < 1e-10 || norm3(n2) < 1e-10) return null;
+      n1 = normalize3v(n1);
+      n2 = normalize3v(n2);
+
+      let x = cross3(n1, n2);
+      if (norm3(x) < 1e-10) return null;
+      x = normalize3v(x);
+
+      const cands = [
+        { x: x.x, y: x.y },
+        { x: -x.x, y: -x.y },
+      ];
+      cands.sort((a, b) => dist2(a, hint) - dist2(b, hint));
+      return cands[0];
+    };
+
+    const exactIntersection = (L1: LineObject, L2: LineObject, hint: Vec2) => {
+      if (space === "E") return exactEuclideanIntersection(L1, L2);
+      if (space === "H") return exactHyperbolicIntersection(L1, L2, hint);
+      return exactSphericalIntersection(L1, L2, hint);
+    };
+
+    const tangentInfoAt = (L: LineObject, p: Vec2) => {
+      if (space === "E") {
+        const u = normalize2({ x: L.baseQ.x - L.baseP.x, y: L.baseQ.y - L.baseP.y });
+        return { u2: u, thetaRadHelper: null as null | { x: number; y: number; z: number } };
+      }
+
+      if (space === "H") {
+        const u = normalize2(hyperbolicTangentAtVertex(p, L.baseP));
+        return { u2: u, thetaRadHelper: null as null | { x: number; y: number; z: number } };
+      }
+
+      const A3 = normalize3v(liftSphereUpper(L.baseP));
+      const B3 = normalize3v(liftSphereUpper(L.baseQ));
+      let n = cross3(A3, B3);
+      if (norm3(n) < 1e-10) n = { x: 0, y: 0, z: 1 };
+      n = normalize3v(n);
+
+      const P3 = normalize3v(liftSphereUpper(p));
+      let t3 = cross3(n, P3);
+      if (norm3(t3) < 1e-10) t3 = cross3(P3, n);
+      t3 = normalize3v(t3);
+
+      const u = normalize2({ x: t3.x, y: t3.y });
+      return { u2: u, thetaRadHelper: t3 };
+    };
+
+    const add = (pApprox: Vec2, L1: LineObject, L2: LineObject) => {
+      const p = exactIntersection(L1, L2, pApprox) ?? pApprox;
+      if (res.some((x) => dist2(x.p, p) < dedupThr2)) return;
+
+      const t1 = tangentInfoAt(L1, p);
+      const t2 = tangentInfoAt(L2, p);
+
+      let thetaDeg = 0;
+      if (space === "S" && t1.thetaRadHelper && t2.thetaRadHelper) {
+        const cos = clamp(dot3(t1.thetaRadHelper, t2.thetaRadHelper), -1, 1);
+        thetaDeg = (Math.acos(cos) * 180) / Math.PI;
+      } else {
+        thetaDeg = (angleBetweenDirs(t1.u2, t2.u2) * 180) / Math.PI;
+      }
+
+      if (Math.abs(thetaDeg - 90) < 0.25) thetaDeg = 90;
+      res.push({ p, u1: t1.u2, u2: t2.u2, thetaDeg });
+    };
+
     for (let i = 0; i < Ls.length; i++) {
       for (let j = i + 1; j < Ls.length; j++) {
         const A = Ls[i].pts;
         const B = Ls[j].pts;
 
-        // find first intersection among polyline segments (good enough)
         outer: for (let a = 0; a < A.length - 1; a++) {
           for (let b = 0; b < B.length - 1; b++) {
             const p = segIntersect(A[a], A[a + 1], B[b], B[b + 1]);
             if (!p) continue;
 
-            const u1 = normalize2({ x: A[a + 1].x - A[a].x, y: A[a + 1].y - A[a].y });
-            const u2 = normalize2({ x: B[b + 1].x - B[b].x, y: B[b + 1].y - B[b].y });
-            add(p, u1, u2);
+            add(p, Ls[i], Ls[j]);
             break outer;
           }
         }
@@ -1989,7 +2134,8 @@ export default function App() {
           const u1 = it.u1;
           const u2 = it.u2;
 
-          const theta = clamp(it.thetaDeg, 0, 180);
+          const rawTheta = clamp(it.thetaDeg, 0, 180);
+          const theta = Math.abs(rawTheta - 90) < 1 ? 90 : rawTheta;
           const other = 180 - theta;
 
           const b1 = normalize2({ x: u1.x + u2.x, y: u1.y + u2.y });
