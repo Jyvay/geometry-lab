@@ -18,7 +18,9 @@ import {
   geodesicLineThrough,
   hyperbolicParallelThroughPoint,
   hyperbolicPerpendicularThroughPoint,
+  altitudeFoot,
 } from "./spaceEngine";
+
 
 import "./App.css";
 
@@ -117,15 +119,24 @@ function hyperbolicGeodesicCircleCenter(A: Vec2, B: Vec2): Vec2 | null {
 }
 
 function hyperbolicTangentAtVertex(vertex: Vec2, other: Vec2): Vec2 {
-  // Tangente à la géodésique (vertex<->other) au point vertex
+  // On oriente toujours la tangente dans le sens "vers other"
+  const toward = { x: other.x - vertex.x, y: other.y - vertex.y };
+
+  const orientTowardOther = (t: Vec2): Vec2 => {
+    return dot2(t, toward) >= 0 ? t : { x: -t.x, y: -t.y };
+  };
+
   const c = hyperbolicGeodesicCircleCenter(vertex, other);
   if (!c) {
-    // diamètre : géodésique = droite euclidienne, tangente = direction du segment
-    return { x: other.x - vertex.x, y: other.y - vertex.y };
+    // diamètre : la géodésique est une droite
+    return orientTowardOther(toward);
   }
+
   // cercle orthogonal au bord : tangente ⟂ (vertex - centre)
   const r = { x: vertex.x - c.x, y: vertex.y - c.y };
-  return { x: -r.y, y: r.x };
+  const t = { x: -r.y, y: r.x };
+
+  return orientTowardOther(t);
 }
 
 
@@ -519,6 +530,7 @@ export default function App() {
 
   /* UI params */
   const [animSpeed, setAnimSpeed] = useState(0.9);
+  const [textSize, setTextSize] = useState(14);
 
   /* sphere display toggle */
   const [sphereInDegrees, setSphereInDegrees] = useState(true);
@@ -539,9 +551,32 @@ export default function App() {
 
   const [angleDeg, setAngleDeg] = useState(60);
   const [showAngles, setShowAngles] = useState(false);
+  const [activePanel, setActivePanel] = useState<"LINES" | "FIGURES" | "SEGMENTS" | null>(null);
 
-  // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
-  // (L’utilisateur peut décocher / recocher pour recalculer.)
+
+
+  /* HUD */
+  const [hudText, setHudText] = useState<string>("");
+
+  /* Frog speech bubble */
+  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
+  const frogSpeechTimerRef = useRef<number | null>(null);
+
+  /* persistent constructions */
+  const [points, setPoints] = useState<GeoPoint[]>([]);
+  const [lines, setLines] = useState<LineObject[]>([]);
+  const [segments, setSegments] = useState<SegmentMeta[]>([]);
+  const [circles, setCircles] = useState<CircleMeta[]>([]);
+  const [triangles, setTriangles] = useState<TriangleMeta[]>([]);
+
+  const pointsRef = useRef<GeoPoint[]>([]);
+  const linesRef = useRef<LineObject[]>([]);
+  const segmentsRef = useRef<SegmentMeta[]>([]);
+  const circlesRef = useRef<CircleMeta[]>([]);
+  const trianglesRef = useRef<TriangleMeta[]>([]);
+
+    // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
+  // (L’utilisateur peut décocher / recocher pour recalculer, et ça s'adapte aux nouveaux segments.)
   useEffect(() => {
     if (!showLengths) return;
 
@@ -583,12 +618,15 @@ export default function App() {
       return best;
     };
 
-    // options candidates
-    const offs = [0.06, -0.06, 0.10, -0.10, 0.14, -0.14, 0.18, -0.18, 0.22, -0.22];
-    const shifts = [0, 0.05, -0.05, 0.10, -0.10];
+    // NOUVEAU : Utilisons des pixels pour garantir un espacement visuel constant
+    const pixelOffs = [15, -15, 25, -25, 35, -35, 45, -45]; 
+    const pixelShifts = [0, 20, -20, 40, -40];
+
+    // NOUVEAU : Pré-calculer la position des points à l'écran pour éviter de coller les étiquettes dessus
+    const pointsScreen = pointsRef.current.map((p) => worldToScreen(vp, p.p));
 
     // même police que dans drawSegmentLabel
-    ctx.font = "14px ui-sans-serif, system-ui";
+    ctx.font = `${textSize}px ui-sans-serif, system-ui`;
 
     for (let si = 0; si < segments.length; si++) {
       const S = segments[si];
@@ -611,8 +649,12 @@ export default function App() {
 
       let bestCandidate: { pos: Vec2; cost: number } | null = null;
 
-      for (const o of offs) {
-        for (const sh of shifts) {
+      for (const po of pixelOffs) {
+        for (const ps of pixelShifts) {
+          // Conversion de l'écart pixel en écart monde selon l'échelle actuelle
+          const o = po / vp.scale;
+          const sh = ps / vp.scale;
+          
           const posW = { x: mid.x + ndir.x * o + tdir.x * sh, y: mid.y + ndir.y * o + tdir.y * sh };
           if (!isValidWorldPoint(posW)) continue;
 
@@ -622,27 +664,38 @@ export default function App() {
           const pad = 6;
           const r = { x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad };
 
-          // hors-cadre => pénalité
-          let cost = 0;
-          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 5;
+          // Le coût de base favorise les positions les plus proches du centre
+          let cost = Math.abs(po) + Math.abs(ps) * 0.5;
 
-          // chevauchement avec autres labels
+          // Pénalité fatale : hors cadre
+          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 1000;
+
+          // Pénalité lourde : chevauchement avec un autre label
           for (const rr of rects) {
-            if (rectIntersects(r, rr)) cost += 10;
+            if (rectIntersects(r, rr)) cost += 500;
           }
 
-          // trop près d’un segment
+          // Pénalité progressive : trop près d'un segment
           const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
           const dseg = minDistToAnySegmentPx(center);
-          if (dseg < 14) cost += (14 - dseg) / 2;
+          if (dseg < 20) cost += (20 - dseg) * 10;
 
-          if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
-          if (cost === 0) break;
+          // Pénalité progressive : trop près d'un point géométrique (A, B, C...)
+          for (const pt of pointsScreen) {
+            const dpt = Math.hypot(center.x - pt.x, center.y - pt.y);
+            if (dpt < 25) cost += (25 - dpt) * 10;
+          }
+
+          if (!bestCandidate || cost < bestCandidate.cost) {
+            bestCandidate = { pos: posW, cost };
+          }
         }
-        if (bestCandidate && bestCandidate.cost === 0) break;
       }
 
-      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.045, y: mid.y + ndir.y * 0.045 };
+      // Par défaut, si aucun candidat n'est parfait, on prend un décalage normal de base converti en monde
+      const defaultOffset = 15 / vp.scale;
+      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * defaultOffset, y: mid.y + ndir.y * defaultOffset };
+      
       nextPos[S.id] = chosen;
 
       // enregistrer rect final pour éviter chevauchement
@@ -652,27 +705,8 @@ export default function App() {
     }
 
     setLenLabelPos(nextPos);
-  }, [showLengths]);
-
-  /* HUD */
-  const [hudText, setHudText] = useState<string>("");
-
-  /* Frog speech bubble */
-  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
-  const frogSpeechTimerRef = useRef<number | null>(null);
-
-  /* persistent constructions */
-  const [points, setPoints] = useState<GeoPoint[]>([]);
-  const [lines, setLines] = useState<LineObject[]>([]);
-  const [segments, setSegments] = useState<SegmentMeta[]>([]);
-  const [circles, setCircles] = useState<CircleMeta[]>([]);
-  const [triangles, setTriangles] = useState<TriangleMeta[]>([]);
-
-  const pointsRef = useRef<GeoPoint[]>([]);
-  const linesRef = useRef<LineObject[]>([]);
-  const segmentsRef = useRef<SegmentMeta[]>([]);
-  const circlesRef = useRef<CircleMeta[]>([]);
-  const trianglesRef = useRef<TriangleMeta[]>([]);
+  }, [showLengths, textSize, segments, space]); 
+  // J'ai ajouté `segments` et `space` dans les dépendances pour que ça se recalcule automatiquement.
 
   useEffect(() => void (pointsRef.current = points), [points]);
   useEffect(() => void (linesRef.current = lines), [lines]);
@@ -751,6 +785,7 @@ export default function App() {
     setCircles(cloneAny(snap.circles));
     setTriangles(cloneAny(snap.triangles));
     setHudText("");
+    setActivePanel(null);
   };
 
   const undoLast = () => {
@@ -771,6 +806,7 @@ export default function App() {
     setCircles([]);
     setTriangles([]);
     setHudText("");
+    setActivePanel(null);
     historyRef.current = [];
     magicLineRef.current = null;
     pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
@@ -781,6 +817,7 @@ export default function App() {
     stateRef.current = reset(stateRef.current, space);
     setRenderState(stateRef.current);
     setHudText("");
+    setActivePanel(null);
     
     magicLineRef.current = null;
     setPoints([]);
@@ -825,6 +862,9 @@ export default function App() {
               pushSnapshot({ lines: cloneAny(next) });
               return next;
             });
+            setActivePanel(null);            
+            magicLineRef.current = null;
+            returnFrogToCenter();
           }
         }
       }
@@ -1126,6 +1166,7 @@ export default function App() {
               // Not supported on sphere in this version
               setHudText("Parallèle non disponible dans l’espace C.");
               setLineOpSession(null);
+              setActivePanel(null);
               window.clearInterval(timer);
               return;
             }
@@ -1134,6 +1175,7 @@ export default function App() {
           if (pts.length < 2) {
             setHudText("Opération impossible à l’endroit indiqué.");
             setLineOpSession(null);
+            setActivePanel(null);
             window.clearInterval(timer);
             return;
           }
@@ -1183,6 +1225,7 @@ export default function App() {
 
       pushSnapshot();
       setHudText("");
+      setActivePanel(null);
       return;
     }
   };
@@ -1190,6 +1233,7 @@ export default function App() {
   /* ---------------- Actions triggered by UI ---------------- */
   const validateLines = () => {
     const allowCreate = pointMode === "NEW";
+    setActivePanel("LINES");
 
     if (lineCmd === "LINE_2PTS") {
       startPointSession(2, allowCreate, "Droite : sélectionne 2 points.", (pts) => {
@@ -1359,6 +1403,7 @@ export default function App() {
 
   const validateFigures = () => {
     const allowCreate = pointMode === "NEW";
+    setActivePanel("FIGURES");
 
     if (figureCmd === "CIRCLE") {
       startPointSession(
@@ -1458,6 +1503,7 @@ export default function App() {
                   else createCircleMeta(O, P, R, tracePath);
 
                   pushSnapshot();
+                  setActivePanel(null);
                 }, 25);
               }, 25);
             }, 25);
@@ -1485,6 +1531,7 @@ export default function App() {
 
         tracePolylineClosed(polyPts, () => {
           pushSnapshot();
+          setActivePanel(null);
         });
       });
     });
@@ -1492,6 +1539,7 @@ export default function App() {
 
   const validateSegments = () => {
     const allowCreate = pointMode === "NEW";
+    setActivePanel("SEGMENTS");
 
     if (segmentCmd === "MIDPOINT") {
       setHudText("Clique un segment existant pour créer son milieu.");
@@ -1504,7 +1552,10 @@ export default function App() {
           const [A, B] = pts;
           const poly = geodesicBetween(space, A.p, B.p, 260);
           createSegmentMeta(A, B, poly);
-          traceSingleGeodesic(A.p, B.p, () => pushSnapshot());
+          traceSingleGeodesic(A.p, B.p, () => {
+            pushSnapshot();
+            setActivePanel(null);
+          });
         });
       });
       return;
@@ -1515,22 +1566,29 @@ export default function App() {
       startPointSession(3, allowCreate, "Hauteur : sélectionne 3 points (A, B, C). La hauteur sera issue de C sur (AB).", (pts) => {
         speakThen(() => {
           const [A, B, C] = pts;
-          // Euclidean foot of perpendicular from C to line AB (in model coords)
-          const ab = { x: B.p.x - A.p.x, y: B.p.y - A.p.y };
-          const t = dot2({ x: C.p.x - A.p.x, y: C.p.y - A.p.y }, ab) / (dot2(ab, ab) || 1);
-          const Fp = { x: A.p.x + ab.x * t, y: A.p.y + ab.y * t };
-          if (!isValidWorldPoint(Fp)) {
+
+          const Fp = altitudeFoot(space, A.p, B.p, C.p, 720);
+          if (!Fp || !isValidWorldPoint(Fp)) {
             setHudText("Hauteur impossible à cet endroit.");
             return;
           }
+
           const F = createPoint(Fp);
-          const poly = geodesicBetween(space, C.p, F.p, 260);
-          createSegmentMeta(C, F, poly);
+
+          const polyCF = geodesicBetween(space, C.p, F.p, 260);
+          const polyAF = geodesicBetween(space, A.p, F.p, 260);
+          const polyFB = geodesicBetween(space, F.p, B.p, 260);
+
+          createSegmentMeta(C, F, polyCF);
+          createSegmentMeta(A, F, polyAF);
+          createSegmentMeta(F, B, polyFB);
+
           traceSingleGeodesic(C.p, F.p, () => pushSnapshot());
         });
       });
       return;
     }
+
 
     if (segmentSpecial === "RADIUS") {
       startPointSession(2, allowCreate, "Rayon : sélectionne 2 points (centre O, point P).", (pts) => {
@@ -1538,7 +1596,10 @@ export default function App() {
           const [O, P] = pts;
           const poly = geodesicBetween(space, O.p, P.p, 260);
           createSegmentMeta(O, P, poly);
-          traceSingleGeodesic(O.p, P.p, () => pushSnapshot());
+          traceSingleGeodesic(O.p, P.p, () => {
+            pushSnapshot();
+            setActivePanel(null);
+          });
         });
       });
       return;
@@ -1551,12 +1612,16 @@ export default function App() {
           const Qp = { x: 2 * O.p.x - P.p.x, y: 2 * O.p.y - P.p.y };
           if (!isValidWorldPoint(Qp)) {
             setHudText("Diamètre impossible à cet endroit.");
+            setActivePanel(null);
             return;
           }
           const Q = createPoint(Qp);
           const poly = geodesicBetween(space, P.p, Q.p, 260);
           createSegmentMeta(P, Q, poly);
-          traceSingleGeodesic(P.p, Q.p, () => pushSnapshot());
+          traceSingleGeodesic(P.p, Q.p, () => {
+            pushSnapshot();
+            setActivePanel(null);
+          });
         });
       });
       return;
@@ -1974,7 +2039,7 @@ export default function App() {
       ctx.fill();
 
       ctx.fillStyle = "#0f172a";
-      ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.font = `${Math.max(10, textSize - 2)}px ui-sans-serif, system-ui`;
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
       ctx.fillText(label, s.x + 10, s.y - 10);
@@ -1984,7 +2049,7 @@ export default function App() {
       const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
       const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
       const n = perp2(u);
-      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
+      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.8 };
 
       const s = worldToScreen(vp, pos);
 
@@ -1993,7 +2058,7 @@ export default function App() {
       const text = `${textAB} = ${formatDistance(d)}`;
 
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.font = `${textSize}px ui-sans-serif, system-ui`;
       ctx.fillStyle = "#0f172a";
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
@@ -2072,7 +2137,7 @@ export default function App() {
       if (showAngles) {
         // Triangle angles (one per vertex)
         ctx.save();
-        ctx.font = "14px ui-sans-serif, system-ui";
+        ctx.font = `${textSize}px ui-sans-serif, system-ui`;
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -2121,7 +2186,7 @@ export default function App() {
         // 4 angles at line intersections
         const ints = computeLineIntersections();
         ctx.save();
-        ctx.font = "13px ui-sans-serif, system-ui";
+        ctx.font = `${Math.max(10, textSize - 1)}px ui-sans-serif, system-ui`;
         ctx.fillStyle = "#0f172a";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
@@ -2170,7 +2235,7 @@ export default function App() {
       // Frog speech bubble (simple)
     if (frogSpeech) {
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.font = `${textSize}px ui-sans-serif, system-ui`;
       ctx.textAlign = "left";
       ctx.textBaseline = "middle";
 
@@ -2178,7 +2243,7 @@ export default function App() {
       const padY = 8;
       const textW = ctx.measureText(frogSpeech).width;
       const boxW = textW + padX * 2;
-      const boxH = 30;
+      const boxH = Math.max(30, textSize + 16);
 
       const bx = fp.x + 26;
       const by = fp.y - 52;
@@ -2220,14 +2285,14 @@ export default function App() {
     // HUD overlay
     if (hudText) {
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.font = `${textSize}px ui-sans-serif, system-ui`;
       ctx.fillStyle = "rgba(15,23,42,0.75)";
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
       ctx.fillText(hudText, 14, 14);
       ctx.restore();
     }
-  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees, textSize]);
 
   /* UI */
   const CANVAS_W = 1320;
@@ -2260,7 +2325,18 @@ export default function App() {
       <div className="main-layout">
         <div className="left-col">
           <div className="canvas-panel">
-            <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} onClick={onCanvasClick} onMouseMove={onMouseMove} />
+            <div className="canvas-wrap">
+              <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} onClick={onCanvasClick} onMouseMove={onMouseMove} />
+            </div>
+
+            <div className="canvas-actions">
+              <button className="btn gray" onClick={undoLast}>
+                Effacer le dernier tracé
+              </button>
+              <button className="btn gray" onClick={clearAll}>
+                Effacer tout
+              </button>
+            </div>
           </div>
         </div>
 
@@ -2268,9 +2344,25 @@ export default function App() {
 
           <section className="section">
             <h2>Réglages</h2>
+
             <label>
-              Animation : {animSpeed.toFixed(2)}
+              Vitesse d&apos;animation : {animSpeed.toFixed(2)}
               <input type="range" min={0.4} max={2.0} step={0.05} value={animSpeed} onChange={(e) => setAnimSpeed(parseFloat(e.target.value))} />
+            </label>
+
+            <label>
+              Taille caractères : {textSize}px
+              <input type="range" min={10} max={24} step={1} value={textSize} onChange={(e) => setTextSize(parseInt(e.target.value, 10))} />
+            </label>
+
+            <label className="tiny">
+              <input type="checkbox" checked={showAngles} onChange={(e) => setShowAngles(e.target.checked)} />
+              Affichage mesure
+            </label>
+
+            <label className="tiny">
+              <input type="checkbox" checked={showLengths} onChange={(e) => setShowLengths(e.target.checked)} />
+              Affichage longueurs
             </label>
 
             <div className="card">
@@ -2286,7 +2378,7 @@ export default function App() {
             </div>
           </section>
 
-          <section className="section">
+          <section className={`section ${activePanel === "LINES" ? "section-active" : ""}`}>
             <h2>Droites</h2>
             <div className="card">
               <label>Commande</label>
@@ -2296,7 +2388,7 @@ export default function App() {
                 <option value="PERPENDICULAR">Tracer la perpendiculaire d'une droite passant par un point</option>
               </select>
 
-              <button className="btn purple" onClick={validateLines}>
+              <button className={`btn ${activePanel === "LINES" ? "gray" : "purple"}`} onClick={validateLines}>
                 Validez la commande
               </button>
 
@@ -2306,7 +2398,7 @@ export default function App() {
             </div>
           </section>
 
-          <section className="section">
+          <section className={`section ${activePanel === "FIGURES" ? "section-active" : ""}`}>
             <h2>Figures</h2>
             <div className="card">
               <label>Commande</label>
@@ -2330,13 +2422,13 @@ export default function App() {
                 </>
               )}
 
-              <button className="btn purple" onClick={validateFigures}>
+              <button className={`btn ${activePanel === "FIGURES" ? "gray" : "purple"}`} onClick={validateFigures}>
                 Validez la commande
               </button>
             </div>
           </section>
 
-          <section className="section">
+          <section className={`section ${activePanel === "SEGMENTS" ? "section-active" : ""}`}>
             <h2>Segments</h2>
             <div className="card">
               <label>Commande</label>
@@ -2357,44 +2449,8 @@ export default function App() {
                 </>
               )}
 
-              <label className="tiny">
-                <input type="checkbox" checked={showLengths} onChange={(e) => setShowLengths(e.target.checked)} />
-                Afficher toutes les longueurs
-              </label>
-
-              <button className="btn purple" onClick={validateSegments}>
+              <button className={`btn ${activePanel === "SEGMENTS" ? "gray" : "purple"}`} onClick={validateSegments}>
                 Validez la commande
-              </button>
-            </div>
-          </section>
-
-          <section className="section">
-            <h2>Angles</h2>
-            <div className="card">
-              <label>Tracer un angle de mesure : {angleDeg}°</label>
-              <input type="range" min={0} max={180} step={5} value={angleDeg} onChange={(e) => setAngleDeg(parseInt(e.target.value, 10))} />
-
-              <label className="tiny">
-                <input type="checkbox" checked={showAngles} onChange={(e) => setShowAngles(e.target.checked)} />
-                Afficher toutes les mesures d'angles
-              </label>
-
-              <button className="btn purple" onClick={validateAngles}>
-                Validez la commande
-              </button>
-
-              <div className="tiny">La grenouille construit un angle ABC : clique A puis B (sommet). C est créé automatiquement.</div>
-            </div>
-          </section>
-
-          <section className="section">
-            <h2>Effacer</h2>
-            <div className="row">
-              <button className="btn gray" onClick={undoLast}>
-                Effacer le dernier tracé
-              </button>
-              <button className="btn gray" onClick={clearAll}>
-                Effacer tout
               </button>
             </div>
           </section>

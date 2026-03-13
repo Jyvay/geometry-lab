@@ -1019,6 +1019,106 @@ export function sphericalPerpendicularGreatCircleThroughPoint(baseP: Vec2, baseQ
   return greatCircleFromNormalAndPoint(v3unit(nPerp), through, steps);
 }
 
+function segIntersect(a1: Vec2, a2: Vec2, b1: Vec2, b2: Vec2): Vec2 | null {
+  const r = { x: a2.x - a1.x, y: a2.y - a1.y };
+  const s = { x: b2.x - b1.x, y: b2.y - b1.y };
+  const qp = { x: b1.x - a1.x, y: b1.y - a1.y };
+
+  const den = r.x * s.y - r.y * s.x;
+  if (Math.abs(den) < 1e-10) return null;
+
+  const t = (qp.x * s.y - qp.y * s.x) / den;
+  const u = (qp.x * r.y - qp.y * r.x) / den;
+
+  if (t < -1e-8 || t > 1 + 1e-8 || u < -1e-8 || u > 1 + 1e-8) return null;
+
+  return {
+    x: a1.x + t * r.x,
+    y: a1.y + t * r.y,
+  };
+}
+
+function closestPointOnSeg(p: Vec2, a: Vec2, b: Vec2): Vec2 {
+  const ab = { x: b.x - a.x, y: b.y - a.y };
+  const ab2 = ab.x * ab.x + ab.y * ab.y || 1;
+  let t = ((p.x - a.x) * ab.x + (p.y - a.y) * ab.y) / ab2;
+  t = Math.max(0, Math.min(1, t));
+  return { x: a.x + t * ab.x, y: a.y + t * ab.y };
+}
+
+function polylineIntersectionOrNearest(base: Vec2[], perp: Vec2[]): Vec2 | null {
+  for (let i = 0; i < base.length - 1; i++) {
+    for (let j = 0; j < perp.length - 1; j++) {
+      const inter = segIntersect(base[i], base[i + 1], perp[j], perp[j + 1]);
+      if (inter) return inter;
+    }
+  }
+
+  let best: { p: Vec2; d2: number } | null = null;
+
+  for (let j = 0; j < perp.length; j++) {
+    const p = perp[j];
+    for (let i = 0; i < base.length - 1; i++) {
+      const q = closestPointOnSeg(p, base[i], base[i + 1]);
+      const dx = p.x - q.x;
+      const dy = p.y - q.y;
+      const d2 = dx * dx + dy * dy;
+      if (!best || d2 < best.d2) best = { p: q, d2 };
+    }
+  }
+
+  return best?.p ?? null;
+}
+
+function sphericalFootOnGreatCircle(baseP: Vec2, baseQ: Vec2, through: Vec2): Vec2 | null {
+  const A = liftToUpperHemisphere(baseP);
+  const B = liftToUpperHemisphere(baseQ);
+  const P = liftToUpperHemisphere(through);
+
+  let nBase = v3cross(A, B);
+  if (v3norm(nBase) < 1e-10) return null;
+  nBase = v3unit(nBase);
+
+  // Projection orthogonale de P sur le plan du grand cercle de base
+  const proj = v3scale(nBase, v3dot(P, nBase));
+  let F = v3add(P, v3scale(proj, -1));
+
+  if (v3norm(F) < 1e-10) return null;
+  F = v3unit(F);
+
+  // On garde le représentant visible dans l’hémisphère supérieur
+  if (F.z < 0) {
+    F = { x: -F.x, y: -F.y, z: -F.z };
+  }
+
+  return { x: F.x, y: F.y };
+}
+
+export function altitudeFoot(space: SpaceId, A: Vec2, B: Vec2, C: Vec2, steps = 720): Vec2 | null {
+  if (space === "E") {
+    const ab = { x: B.x - A.x, y: B.y - A.y };
+    const ab2 = ab.x * ab.x + ab.y * ab.y || 1;
+    const t = ((C.x - A.x) * ab.x + (C.y - A.y) * ab.y) / ab2;
+    return {
+      x: A.x + t * ab.x,
+      y: A.y + t * ab.y,
+    };
+  }
+
+  if (space === "H") {
+    const base = geodesicLineThrough("H", A, B, steps);
+    const perp = hyperbolicPerpendicularThroughPoint(A, B, C, steps);
+    if (base.length < 2 || perp.length < 2) return null;
+    return polylineIntersectionOrNearest(base, perp);
+  }
+
+  if (space === "S") {
+    return sphericalFootOnGreatCircle(A, B, C);
+  }
+
+  return null;
+}
+
 function greatCircleFromNormalAndPoint(n: Vec3, through: Vec2, steps: number): Vec2[] {
   // plane: n·X=0 ; must pass through lifted(through)
   const P = liftToUpperHemisphere(through);
