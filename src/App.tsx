@@ -666,15 +666,13 @@ export default function App() {
 
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
-    const txt = FROG_QUOTES[Math.floor(Math.random() * FROG_QUOTES.length)];
-    setFrogSpeech(txt);
-    if (frogSpeechTimerRef.current) window.clearTimeout(frogSpeechTimerRef.current);
-    frogSpeechTimerRef.current = window.setTimeout(() => setFrogSpeech(null), 1300);
-
-    window.setTimeout(() => {
-      // start after frog "speaks"
-      fn();
-    }, 950);
+    void FROG_QUOTES.length;
+    if (frogSpeechTimerRef.current) {
+      window.clearTimeout(frogSpeechTimerRef.current);
+      frogSpeechTimerRef.current = null;
+    }
+    setFrogSpeech(null);
+    fn();
   };
 
   /* (c) Correct cursor mapping under CSS scaling */
