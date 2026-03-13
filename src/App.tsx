@@ -507,6 +507,32 @@ export default function App() {
   const [angleDeg, setAngleDeg] = useState(60);
   const [showAngles, setShowAngles] = useState(false);
 
+  /* HUD */
+  const [hudText, setHudText] = useState<string>("");
+
+  /* Frog speech bubble */
+  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
+  const frogSpeechTimerRef = useRef<number | null>(null);
+
+  /* persistent constructions */
+  const [points, setPoints] = useState<GeoPoint[]>([]);
+  const [lines, setLines] = useState<LineObject[]>([]);
+  const [segments, setSegments] = useState<SegmentMeta[]>([]);
+  const [circles, setCircles] = useState<CircleMeta[]>([]);
+  const [triangles, setTriangles] = useState<TriangleMeta[]>([]);
+
+  const pointsRef = useRef<GeoPoint[]>([]);
+  const linesRef = useRef<LineObject[]>([]);
+  const segmentsRef = useRef<SegmentMeta[]>([]);
+  const circlesRef = useRef<CircleMeta[]>([]);
+  const trianglesRef = useRef<TriangleMeta[]>([]);
+
+  useEffect(() => void (pointsRef.current = points), [points]);
+  useEffect(() => void (linesRef.current = lines), [lines]);
+  useEffect(() => void (segmentsRef.current = segments), [segments]);
+  useEffect(() => void (circlesRef.current = circles), [circles]);
+  useEffect(() => void (trianglesRef.current = triangles), [triangles]);
+
   // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
   // (L’utilisateur peut décocher / recocher pour recalculer.)
   useEffect(() => {
@@ -536,7 +562,6 @@ export default function App() {
       return Math.hypot(p.x - q.x, p.y - q.y);
     };
 
-    // Pré-calcule toutes les polylines segments (en coordonnées écran) pour tester les collisions.
     const segPolysScreen = segments.map((S) => S.poly.map((pt) => worldToScreen(vp, pt)));
 
     const minDistToAnySegmentPx = (pScreen: Vec2) => {
@@ -550,27 +575,23 @@ export default function App() {
       return best;
     };
 
-    // options candidates
-    const offs = [0.06, -0.06, 0.10, -0.10, 0.14, -0.14, 0.18, -0.18, 0.22, -0.22];
-    const shifts = [0, 0.05, -0.05, 0.10, -0.10];
+    const offs = [0.09, -0.09, 0.14, -0.14, 0.20, -0.20, 0.27, -0.27];
+    const shifts = [0, 0.08, -0.08, 0.16, -0.16];
 
-    // même police que dans drawSegmentLabel
-    ctx.font = "14px ui-sans-serif, system-ui";
+    ctx.font = "13px ui-sans-serif, system-ui";
 
     for (let si = 0; si < segments.length; si++) {
       const S = segments[si];
 
-      // texte (approx) pour les dimensions
       const d = distanceExact(space, S.a, S.b);
       const textAB = `${S.A}${S.B}`;
       const text = `${textAB} = ${formatDistance(d)}`;
       const w = ctx.measureText(text).width;
-      const h = 18; // approx
+      const h = 16;
 
       const midIdx = Math.floor(S.poly.length / 2);
       const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
 
-      // tangente locale (si possible)
       const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
       const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
       const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
@@ -585,23 +606,25 @@ export default function App() {
 
           const s = worldToScreen(vp, posW);
 
-          // bounding box (left aligned, middle baseline)
-          const pad = 6;
-          const r = { x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad };
+          const padX = 8;
+          const padY = 5;
+          const r = {
+            x1: s.x - w / 2 - padX,
+            y1: s.y - h / 2 - padY,
+            x2: s.x + w / 2 + padX,
+            y2: s.y + h / 2 + padY,
+          };
 
-          // hors-cadre => pénalité
           let cost = 0;
           if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 5;
 
-          // chevauchement avec autres labels
           for (const rr of rects) {
             if (rectIntersects(r, rr)) cost += 10;
           }
 
-          // trop près d’un segment
           const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
           const dseg = minDistToAnySegmentPx(center);
-          if (dseg < 14) cost += (14 - dseg) / 2;
+          if (dseg < 20) cost += (20 - dseg);
 
           if (!bestCandidate || cost < bestCandidate.cost) bestCandidate = { pos: posW, cost };
           if (cost === 0) break;
@@ -609,43 +632,23 @@ export default function App() {
         if (bestCandidate && bestCandidate.cost === 0) break;
       }
 
-      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.045, y: mid.y + ndir.y * 0.045 };
+      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * 0.09, y: mid.y + ndir.y * 0.09 };
       nextPos[S.id] = chosen;
 
-      // enregistrer rect final pour éviter chevauchement
       const s = worldToScreen(vp, chosen);
-      const pad = 6;
-      rects.push({ x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad });
+      const padX = 8;
+      const padY = 5;
+      rects.push({
+        x1: s.x - w / 2 - padX,
+        y1: s.y - h / 2 - padY,
+        x2: s.x + w / 2 + padX,
+        y2: s.y + h / 2 + padY,
+      });
     }
 
     setLenLabelPos(nextPos);
-  }, [showLengths]);
+  }, [showLengths, segments, space, sphereInDegrees]);
 
-  /* HUD */
-  const [hudText, setHudText] = useState<string>("");
-
-  /* Frog speech bubble */
-  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
-  const frogSpeechTimerRef = useRef<number | null>(null);
-
-  /* persistent constructions */
-  const [points, setPoints] = useState<GeoPoint[]>([]);
-  const [lines, setLines] = useState<LineObject[]>([]);
-  const [segments, setSegments] = useState<SegmentMeta[]>([]);
-  const [circles, setCircles] = useState<CircleMeta[]>([]);
-  const [triangles, setTriangles] = useState<TriangleMeta[]>([]);
-
-  const pointsRef = useRef<GeoPoint[]>([]);
-  const linesRef = useRef<LineObject[]>([]);
-  const segmentsRef = useRef<SegmentMeta[]>([]);
-  const circlesRef = useRef<CircleMeta[]>([]);
-  const trianglesRef = useRef<TriangleMeta[]>([]);
-
-  useEffect(() => void (pointsRef.current = points), [points]);
-  useEffect(() => void (linesRef.current = lines), [lines]);
-  useEffect(() => void (segmentsRef.current = segments), [segments]);
-  useEffect(() => void (circlesRef.current = circles), [circles]);
-  useEffect(() => void (trianglesRef.current = triangles), [triangles]);
 
   const formula = useMemo(() => spaceFormula(space), [space]);
 
@@ -1771,18 +1774,22 @@ export default function App() {
       ctx.fill();
 
       ctx.fillStyle = "#0f172a";
-      ctx.font = "12px ui-sans-serif, system-ui";
+      ctx.font = "11px ui-sans-serif, system-ui";
       ctx.textAlign = "left";
       ctx.textBaseline = "alphabetic";
-      ctx.fillText(label, s.x + 10, s.y - 10);
+      ctx.fillText(label, s.x + 8, s.y - 8);
     };
 
     const drawSegmentLabel = (S: SegmentMeta) => {
-      const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
-      const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
-      const n = perp2(u);
-      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.045 };
+      const midIdx = Math.floor(S.poly.length / 2);
+      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
 
+      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
+      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
+      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
+      const ndir = perp2(tdir);
+
+      const pos = lenLabelPos[S.id] ?? { x: mid.x + ndir.x * 0.09, y: mid.y + ndir.y * 0.09 };
       const s = worldToScreen(vp, pos);
 
       const d = distanceExact(space, S.a, S.b);
@@ -1790,20 +1797,27 @@ export default function App() {
       const text = `${textAB} = ${formatDistance(d)}`;
 
       ctx.save();
-      ctx.font = "14px ui-sans-serif, system-ui";
-      ctx.fillStyle = "#0f172a";
-      ctx.textAlign = "left";
+      ctx.font = "13px ui-sans-serif, system-ui";
+      ctx.textAlign = "center";
       ctx.textBaseline = "middle";
 
+      const w = ctx.measureText(text).width;
+      const wAB = ctx.measureText(textAB).width;
+      const boxH = 16;
+      const padX = 8;
+      const padY = 5;
+
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.fillRect(s.x - w / 2 - padX, s.y - boxH / 2 - padY, w + 2 * padX, boxH + 2 * padY);
+
+      ctx.fillStyle = "#0f172a";
       ctx.fillText(text, s.x, s.y);
 
-      // Draw overline over AB
-      const wAB = ctx.measureText(textAB).width;
       ctx.strokeStyle = "#0f172a";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.25;
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y - 10);
-      ctx.lineTo(s.x + wAB, s.y - 10);
+      ctx.moveTo(s.x - wAB / 2, s.y - 9);
+      ctx.lineTo(s.x + wAB / 2, s.y - 9);
       ctx.stroke();
 
       ctx.restore();
