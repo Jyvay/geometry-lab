@@ -1929,7 +1929,8 @@ export default function App() {
           const u1 = it.u1;
           const u2 = it.u2;
 
-          const theta = clamp(it.thetaDeg, 0, 180);
+          const rawTheta = clamp(it.thetaDeg, 0, 180);
+          const theta = Math.abs(rawTheta - 90) <= 1 ? 90 : rawTheta;
           const other = 180 - theta;
 
           const b1 = normalize2({ x: u1.x + u2.x, y: u1.y + u2.y });
