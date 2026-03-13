@@ -76,16 +76,6 @@ function distPointToSegment(p: Vec2, a: Vec2, b: Vec2) {
 const euclidLen = (a: Vec2, b: Vec2) => Math.hypot(b.x - a.x, b.y - a.y);
 const dot2 = (a: Vec2, b: Vec2) => a.x * b.x + a.y * b.y;
 const norm2 = (a: Vec2) => Math.hypot(a.x, a.y) || 1;
-const mobiusAdd = (a: Vec2, b: Vec2): Vec2 => {
-  const a2 = dot2(a, a);
-  const b2 = dot2(b, b);
-  const ab = dot2(a, b);
-  const denom = 1 + 2 * ab + a2 * b2;
-  return {
-    x: ((1 + 2 * ab + b2) * a.x + (1 - a2) * b.x) / denom,
-    y: ((1 + 2 * ab + b2) * a.y + (1 - a2) * b.y) / denom,
-  };
-};
 const normalize2 = (a: Vec2) => {
   const n = norm2(a);
   return { x: a.x / n, y: a.y / n };
@@ -372,40 +362,6 @@ function distanceExact(space: SpaceId, A: Vec2, B: Vec2) {
   return Math.acos(cos); // radians on unit sphere
 }
 
-function geodesicMidpointExact(space: SpaceId, A: Vec2, B: Vec2): Vec2 {
-  if (space === "E") {
-    return { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-  }
-
-  if (space === "H") {
-    const b0 = mobiusAdd({ x: -A.x, y: -A.y }, B);
-    const r = Math.hypot(b0.x, b0.y);
-    if (r < 1e-12) return A;
-
-    const u = { x: b0.x / r, y: b0.y / r };
-    const rr = Math.min(r, 0.999999);
-    const rho = Math.tanh(0.5 * Math.atanh(rr));
-    const m0 = { x: u.x * rho, y: u.y * rho };
-    const M = mobiusAdd(A, m0);
-    const m2 = M.x * M.x + M.y * M.y;
-    if (m2 >= 0.999999) {
-      const s = 0.999999 / Math.sqrt(m2);
-      return { x: M.x * s, y: M.y * s };
-    }
-    return M;
-  }
-
-  const a = liftSphereUpper(A);
-  const b = liftSphereUpper(B);
-  const sum = { x: a.x + b.x, y: a.y + b.y, z: a.z + b.z };
-  const n = norm3(sum);
-  if (n < 1e-10) {
-    const pts = geodesicBetween(space, A, B, 800);
-    return pts[Math.floor(pts.length / 2)] ?? { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-  }
-  return { x: sum.x / n, y: sum.y / n };
-}
-
 function angleHand(space: SpaceId, A: Vec2, B: Vec2, C: Vec2) {
   if (space === "S") {
     // spherical angle at B via tangents in tangent plane at B
@@ -483,6 +439,42 @@ type LineObject = {
 };
 
 type PointMode = "EXISTING" | "NEW";
+
+const FROG_QUOTES = [
+  "Déjà la fin de ma pause?",
+  "Hé je faisais une sieste !",
+  "Si tu insistes...",
+  "Dire que je voulais devenir Coâhsmonaute à la base...",
+  "Très bien, très bien",
+  "Et le mot magique?",
+  "C'est quoi mes horaires déjà?",
+  "Un métier pleins d'opportunités qu'ils disaient...",
+  "Ce sera tout?",
+  "On gaspille mes talents.",
+  "On aura tout vu..",
+  "C'est vraiment nécessaire?",
+  "Oui oui, ce sera fait",
+  "C'est pas vraiment un job pour un batracien ça",
+  "Pas besoin de répéter j'ai compris..",
+  "Regarde et admire!",
+  "Il n'y a pas meilleure grenouille dessinatrice que moi!",
+  "Que ferais-tu sans moi?",
+  "Admire ce travail!",
+  "Dire que j'ai quitté mon étang pour ça",
+  "Ce sera tout?",
+  "Je préviens ça fera des coûts supplémentaires.",
+  "Je suis payé combien pour faire ça déjà?",
+  "Encore?",
+  "On m'a déjà demandé ça aujourd'hui!",
+  "J'ai plus de potentiel que ça tu sais...",
+  "Bon ben au travail alors.",
+  "Ok, mais après je fais une pause.",
+  "Y a pas une convention collective pour ce job?",
+  "Je m'en occupe mais bien parce que c'est toi.",
+  "J'aurais pas dis mieux.",
+  "Bonne idée!",
+  "Intéressant...",
+];
 
 export default function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -632,6 +624,9 @@ export default function App() {
   /* HUD */
   const [hudText, setHudText] = useState<string>("");
 
+  /* Frog speech bubble */
+  const [frogSpeech, setFrogSpeech] = useState<string | null>(null);
+  const frogSpeechTimerRef = useRef<number | null>(null);
 
   /* persistent constructions */
   const [points, setPoints] = useState<GeoPoint[]>([]);
@@ -663,14 +658,23 @@ export default function App() {
   const formatDistance = (d: number) => {
     if (!isFinite(d)) return "∞";
     if (space === "S") {
-      return `${(d * 10).toFixed(2)} cm`;
+      if (sphereInDegrees) return `${((d * 180) / Math.PI).toFixed(1)}°`;
+      return `${d.toFixed(3)} rad`;
     }
     return `${d.toFixed(2)} cm`;
   };
 
   const speakThen = (fn: () => void) => {
     if (stateRef.current.anim.active) return;
-    fn();
+    const txt = FROG_QUOTES[Math.floor(Math.random() * FROG_QUOTES.length)];
+    setFrogSpeech(txt);
+    if (frogSpeechTimerRef.current) window.clearTimeout(frogSpeechTimerRef.current);
+    frogSpeechTimerRef.current = window.setTimeout(() => setFrogSpeech(null), 1300);
+
+    window.setTimeout(() => {
+      // start after frog "speaks"
+      fn();
+    }, 950);
   };
 
   /* (c) Correct cursor mapping under CSS scaling */
@@ -748,9 +752,6 @@ export default function App() {
     stateRef.current = reset(stateRef.current, space);
     setRenderState(stateRef.current);
     setHudText("");
-
-    magicLineRef.current = null;
-    setLineOpSession(null);
 
     setPoints([]);
     setLines([]);
@@ -877,7 +878,6 @@ export default function App() {
     const thr = 0.035;
     let best: { line: LineObject; d: number } | null = null;
     for (const L of linesRef.current) {
-      if (L.space !== space) continue;
       const pts = L.pts;
       for (let i = 0; i < pts.length - 1; i++) {
         const d = distPointToSegment(w, pts[i], pts[i + 1]);
@@ -1112,8 +1112,8 @@ export default function App() {
       const S = pickSegmentMetaAt(w);
       if (!S) return;
 
-      // Create intrinsic midpoint on the geodesic segment
-      const mid = geodesicMidpointExact(space, S.a, S.b);
+      // Create midpoint
+      const mid = { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
       if (!isValidWorldPoint(mid)) return;
 
       const M = createPoint(mid);
@@ -1737,6 +1737,18 @@ export default function App() {
     const drawPolyline = (pts: Vec2[], color: string, width: number) => {
       if (pts.length < 2) return;
 
+      if (pts.length === 2) {
+        const a = worldToScreen(vp, pts[0]);
+        const b = worldToScreen(vp, pts[1]);
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+        return;
+      }
+
       const JUMP = 0.35; // seuil en coords monde (à ajuster si besoin)
 
       ctx.strokeStyle = color;
@@ -1814,7 +1826,6 @@ export default function App() {
     withDiskClip(() => {
       // Custom geodesic lines
       for (const L of lines) {
-        if (L.space !== space) continue;
         // Si on est en sphérique et qu’on a z[], on dessine plein/pointillé selon z
         if (space === "S" && (L as any).z) {
           drawPolylineZ(L.pts, (L as any).z, "#0f172a", 3);
@@ -1929,8 +1940,7 @@ export default function App() {
           const u1 = it.u1;
           const u2 = it.u2;
 
-          const rawTheta = clamp(it.thetaDeg, 0, 180);
-          const theta = Math.abs(rawTheta - 90) <= 1 ? 90 : rawTheta;
+          const theta = clamp(it.thetaDeg, 0, 180);
           const other = 180 - theta;
 
           const b1 = normalize2({ x: u1.x + u2.x, y: u1.y + u2.y });
@@ -1965,6 +1975,56 @@ export default function App() {
     ctx.fillStyle = "#0f172a";
     ctx.fillText("🐸", fp.x, fp.y);
 
+      // Frog speech bubble (simple)
+    if (frogSpeech) {
+      ctx.save();
+      ctx.font = "14px ui-sans-serif, system-ui";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+
+      const padX = 10;
+      const padY = 8;
+      const textW = ctx.measureText(frogSpeech).width;
+      const boxW = textW + padX * 2;
+      const boxH = 30;
+
+      const bx = fp.x + 26;
+      const by = fp.y - 52;
+
+      // rounded rect
+      const r = 10;
+      ctx.fillStyle = "rgba(255,255,255,0.95)";
+      ctx.strokeStyle = "#0f172a";
+      ctx.lineWidth = 2;
+
+      ctx.beginPath();
+      ctx.moveTo(bx + r, by);
+      ctx.lineTo(bx + boxW - r, by);
+      ctx.quadraticCurveTo(bx + boxW, by, bx + boxW, by + r);
+      ctx.lineTo(bx + boxW, by + boxH - r);
+      ctx.quadraticCurveTo(bx + boxW, by + boxH, bx + boxW - r, by + boxH);
+      ctx.lineTo(bx + r, by + boxH);
+      ctx.quadraticCurveTo(bx, by + boxH, bx, by + boxH - r);
+      ctx.lineTo(bx, by + r);
+      ctx.quadraticCurveTo(bx, by, bx + r, by);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // tail
+      ctx.beginPath();
+      ctx.moveTo(fp.x + 10, fp.y - 20);
+      ctx.lineTo(bx + 18, by + boxH);
+      ctx.lineTo(bx + 32, by + boxH);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.fillStyle = "#0f172a";
+      ctx.fillText(frogSpeech, bx + padX, by + boxH / 2);
+      ctx.restore();
+    }
+
     // HUD overlay
     if (hudText) {
       ctx.save();
@@ -1975,7 +2035,7 @@ export default function App() {
       ctx.fillText(hudText, 14, 14);
       ctx.restore();
     }
-  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles,  hudText, animSpeed, sphereInDegrees]);
+  }, [renderState, space, points, lines, circles, segments, triangles, showLengths, lenLabelPos, showAngles, frogSpeech, hudText, animSpeed, sphereInDegrees]);
 
   /* UI */
   const CANVAS_W = 1320;
