@@ -612,11 +612,16 @@ export default function App() {
     };
 
     // Pré-calcule toutes les polylines segments (en coordonnées écran) pour tester les collisions.
-    const segPolysScreen = segments.map((S) => S.poly.map((pt) => worldToScreen(vp, pt)));
+    const segPolysScreen = segments.map((S) => ({
+      id: S.id,
+      poly: S.poly.map((pt) => worldToScreen(vp, pt)),
+    }));
 
-    const minDistToAnySegmentPx = (pScreen: Vec2) => {
+    const minDistToOtherSegmentsPx = (pScreen: Vec2, excludeId: string) => {
       let best = Infinity;
-      for (const poly of segPolysScreen) {
+      for (const entry of segPolysScreen) {
+        if (entry.id === excludeId) continue;
+        const poly = entry.poly;
         for (let i = 0; i < poly.length - 1; i++) {
           const d = distPointToSegScreen(pScreen, poly[i], poly[i + 1]);
           if (d < best) best = d;
@@ -626,8 +631,8 @@ export default function App() {
     };
 
     // NOUVEAU : Utilisons des pixels pour garantir un espacement visuel constant
-    const pixelOffs = [15, -15, 25, -25, 35, -35, 45, -45]; 
-    const pixelShifts = [0, 20, -20, 40, -40];
+    const pixelOffs = [16]; // on garde un placement par défaut au-dessus du milieu
+    const pixelShifts = [0, 20, -20, 40, -40, 60, -60];
 
     // NOUVEAU : Pré-calculer la position des points à l'écran pour éviter de coller les étiquettes dessus
     const pointsScreen = pointsRef.current.map((p) => worldToScreen(vp, p.p));
@@ -645,12 +650,20 @@ export default function App() {
       const w = ctx.measureText(text).width;
       const h = 18; // approx
 
-      const midIdx = Math.floor(S.poly.length / 2);
-      const mid = S.poly[midIdx] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+      const mid =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2)]
+          : { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
 
       // tangente locale (si possible)
-      const p0 = S.poly[Math.max(0, midIdx - 1)] ?? S.a;
-      const p1 = S.poly[Math.min(S.poly.length - 1, midIdx + 1)] ?? S.b;
+      const p0 =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2) - 1]
+          : S.a;
+      const p1 =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2) + 1]
+          : S.b;
       const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
       const ndir = perp2(tdir);
 
@@ -658,36 +671,47 @@ export default function App() {
 
       for (const po of pixelOffs) {
         for (const ps of pixelShifts) {
-          // Conversion de l'écart pixel en écart monde selon l'échelle actuelle
           const o = po / vp.scale;
           const sh = ps / vp.scale;
-          
-          const posW = { x: mid.x + ndir.x * o + tdir.x * sh, y: mid.y + ndir.y * o + tdir.y * sh };
+
+          const posW = {
+            x: mid.x + ndir.x * o + tdir.x * sh,
+            y: mid.y + ndir.y * o + tdir.y * sh,
+          };
           if (!isValidWorldPoint(posW)) continue;
 
           const s = worldToScreen(vp, posW);
 
-          // bounding box (left aligned, middle baseline)
+          // bbox centrée sur le point du label
           const pad = 6;
-          const r = { x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad };
+          const r = {
+            x1: s.x - w / 2 - pad,
+            y1: s.y - h / 2 - pad,
+            x2: s.x + w / 2 + pad,
+            y2: s.y + h / 2 + pad,
+          };
 
-          // Le coût de base favorise les positions les plus proches du centre
-          let cost = Math.abs(po) + Math.abs(ps) * 0.5;
+          let cost = 0;
 
-          // Pénalité fatale : hors cadre
-          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) cost += 1000;
+          // on préfère très fortement rester centré
+          cost += Math.abs(ps) * 2;
 
-          // Pénalité lourde : chevauchement avec un autre label
+          // hors cadre
+          if (r.x1 < 0 || r.x2 > canvas.width || r.y1 < 0 || r.y2 > canvas.height) {
+            cost += 1000;
+          }
+
+          // collision avec d'autres labels
           for (const rr of rects) {
             if (rectIntersects(r, rr)) cost += 500;
           }
 
-          // Pénalité progressive : trop près d'un segment
-          const center = { x: (r.x1 + r.x2) / 2, y: (r.y1 + r.y2) / 2 };
-          const dseg = minDistToAnySegmentPx(center);
-          if (dseg < 20) cost += (20 - dseg) * 10;
+          // trop proche d'un AUTRE segment passant au milieu
+          const center = { x: s.x, y: s.y };
+          const dseg = minDistToOtherSegmentsPx(center, S.id);
+          if (dseg < 22) cost += (22 - dseg) * 40;
 
-          // Pénalité progressive : trop près d'un point géométrique (A, B, C...)
+          // trop proche d'un point
           for (const pt of pointsScreen) {
             const dpt = Math.hypot(center.x - pt.x, center.y - pt.y);
             if (dpt < 25) cost += (25 - dpt) * 10;
@@ -699,16 +723,24 @@ export default function App() {
         }
       }
 
-      // Par défaut, si aucun candidat n'est parfait, on prend un décalage normal de base converti en monde
-      const defaultOffset = 15 / vp.scale;
-      const chosen = bestCandidate?.pos ?? { x: mid.x + ndir.x * defaultOffset, y: mid.y + ndir.y * defaultOffset };
+      const defaultOffset = 16 / vp.scale;
+      const chosen =
+        bestCandidate?.pos ?? {
+          x: mid.x + ndir.x * defaultOffset,
+          y: mid.y + ndir.y * defaultOffset,
+        };
       
       nextPos[S.id] = chosen;
 
       // enregistrer rect final pour éviter chevauchement
       const s = worldToScreen(vp, chosen);
       const pad = 6;
-      rects.push({ x1: s.x - pad, y1: s.y - h / 2 - pad, x2: s.x + w + pad, y2: s.y + h / 2 + pad });
+      rects.push({
+        x1: s.x - w / 2 - pad,
+        y1: s.y - h / 2 - pad,
+        x2: s.x + w / 2 + pad,
+        y2: s.y + h / 2 + pad,
+      }); 
     }
 
     setLenLabelPos(nextPos);
@@ -2071,32 +2103,71 @@ export default function App() {
     };
 
     const drawSegmentLabel = (S: SegmentMeta) => {
-      const mid = S.poly[Math.floor(S.poly.length / 2)] ?? { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
-      const u = normalize2({ x: S.b.x - S.a.x, y: S.b.y - S.a.y });
-      const n = perp2(u);
-      const pos = lenLabelPos[S.id] ?? { x: mid.x + n.x * 0.045, y: mid.y + n.y * 0.8 };
+      const mid =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2)]
+          : { x: (S.a.x + S.b.x) / 2, y: (S.a.y + S.b.y) / 2 };
+
+      // Tangente locale au milieu du segment / côté
+      const p0 =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2) - 1]
+          : S.a;
+      const p1 =
+        S.poly.length >= 3
+          ? S.poly[Math.floor(S.poly.length / 2) + 1]
+          : S.b;
+      const tdir = normalize2({ x: p1.x - p0.x, y: p1.y - p0.y });
+      const ndir = perp2(tdir);
+
+      // Position calculée par lenLabelPos ; fallback simple si absent
+      const offsetPx = 14;
+      const offsetW = offsetPx / vp.scale;
+      const pos = lenLabelPos[S.id] ?? {
+        x: mid.x + ndir.x * offsetW,
+        y: mid.y + ndir.y * offsetW,
+      };
 
       const s = worldToScreen(vp, pos);
+      const s0 = worldToScreen(vp, p0);
+      const s1 = worldToScreen(vp, p1);
+
+      // Angle écran du segment
+      let ang = Math.atan2(s1.y - s0.y, s1.x - s0.x);
+
+      // Empêche le texte d’être à l’envers :
+      // on autorise vertical haut/bas, mais jamais retourné tête en bas
+      if (ang > Math.PI / 2) ang -= Math.PI;
+      if (ang < -Math.PI / 2) ang += Math.PI;
 
       const d = distanceExact(space, S.a, S.b);
       const textAB = `${S.A}${S.B}`;
       const text = `${textAB} = ${formatDistance(d)}`;
 
       ctx.save();
+      ctx.translate(s.x, s.y);
+      ctx.rotate(ang);
+
       ctx.font = `${textSize}px ui-sans-serif, system-ui`;
       ctx.fillStyle = "#0f172a";
-      ctx.textAlign = "left";
+      ctx.textAlign = "center";
       ctx.textBaseline = "middle";
 
-      ctx.fillText(text, s.x, s.y);
+      ctx.fillText(text, 0, 0);
 
-      // Draw overline over AB
+      // Barre au-dessus de AB, centrée elle aussi
+      const fullW = ctx.measureText(text).width;
       const wAB = ctx.measureText(textAB).width;
+      const overY = -Math.max(8, textSize * 0.55);
+
+      // Bord gauche du texte complet centré en 0
+      const leftEdge = -fullW / 2;
+
       ctx.strokeStyle = "#0f172a";
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y - 10);
-      ctx.lineTo(s.x + wAB, s.y - 10);
+      ctx.moveTo(leftEdge, overY);
+      ctx.lineTo(leftEdge + wAB, overY);
       ctx.stroke();
 
       ctx.restore();
@@ -2351,13 +2422,6 @@ export default function App() {
             <option value="H">Espace B</option>
             <option value="S">Espace C</option>
           </select>
-
-          {space === "S" && (
-            <label className="tiny">
-              <input type="checkbox" checked={sphereInDegrees} onChange={(e) => setSphereInDegrees(e.target.checked)} />
-              Afficher les longueurs sphériques en degrés (sinon radians)
-            </label>
-          )}
         </div>
       </header>
 
@@ -2396,7 +2460,7 @@ export default function App() {
 
             <label className="tiny">
               <input type="checkbox" checked={showAngles} onChange={(e) => setShowAngles(e.target.checked)} />
-              Affichage mesure
+              Affichage mesures d'angle
             </label>
 
             <label className="tiny">
