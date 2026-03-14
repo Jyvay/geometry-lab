@@ -543,6 +543,12 @@ export default function App() {
   const [figureCmd, setFigureCmd] = useState<"TRIANGLE" | "CIRCLE">("TRIANGLE");
   const [triangleType, setTriangleType] = useState<TriangleType>("ANY");
 
+  useEffect(() => {
+    if (pointMode === "EXISTING" && figureCmd === "TRIANGLE" && triangleType !== "ANY") {
+      setTriangleType("ANY");
+    }
+  }, [pointMode, figureCmd, triangleType]);
+
   const [segmentCmd, setSegmentCmd] = useState<"SEGMENT" | "SPECIAL" | "MIDPOINT">("SEGMENT");
   const [segmentSpecial, setSegmentSpecial] = useState<"ALTITUDE" | "RADIUS" | "DIAMETER">("RADIUS");
   const [showLengths, setShowLengths] = useState(false);
@@ -574,6 +580,7 @@ export default function App() {
   const segmentsRef = useRef<SegmentMeta[]>([]);
   const circlesRef = useRef<CircleMeta[]>([]);
   const trianglesRef = useRef<TriangleMeta[]>([]);
+  const animatedSphericalCircleRef = useRef<{ path: Vec2[]; z: number[] } | null>(null);
 
     // Recalcule une disposition lisible des étiquettes lorsqu’on active l’affichage des longueurs.
   // (L’utilisateur peut décocher / recocher pour recalculer, et ça s'adapte aux nouveaux segments.)
@@ -809,6 +816,7 @@ export default function App() {
     setActivePanel(null);
     historyRef.current = [];
     magicLineRef.current = null;
+    pointLabelCounterRef.current = 0;
     pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
   };
 
@@ -825,6 +833,7 @@ export default function App() {
     setSegments([]);
     setCircles([]);
     setTriangles([]);
+    pointLabelCounterRef.current = 0;
 
     historyRef.current = [];
     pushSnapshot({ engine: cloneAny(stateRef.current), points: [], lines: [], segments: [], circles: [], triangles: [] });
@@ -1077,6 +1086,8 @@ export default function App() {
 
   /* ---------------- On canvas click ---------------- */
   const onCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (e.button !== 0) return; // clic gauche uniquement
+
     const { w } = eventToWorld(e);
     if (!isValidWorldPoint(w)) return;
 
@@ -1228,6 +1239,14 @@ export default function App() {
       setActivePanel(null);
       return;
     }
+    // Clic libre sur le canevas : créer un point
+    if (pointMode !== "NEW") return;
+
+    const existing = pickPointAt(w);
+    if (existing) return;
+
+    const pt = createPoint(w);
+    pushSnapshot({ points: cloneAny([...pointsRef.current, pt]) });
   };
 
   /* ---------------- Actions triggered by UI ---------------- */
@@ -1483,13 +1502,13 @@ export default function App() {
 
                 // 6) Tracer uniquement le cercle (pas de rayon)
                 if (space === "S") {
-                  // en sphère : pas de tracé engine (pour pouvoir faire pointillés derrière)
+                  // en sphère : pas de tracé engine, on affiche un aperçu progressif via le render
+                  animatedSphericalCircleRef.current = circleZ ? { path: tracePath, z: circleZ } : null;
                   stateRef.current = animatePath(stateRef.current, tracePath, animSpeed, false);
                 } else {
                   stateRef.current = startTracing(stateRef.current, traceColor, 3);
                   stateRef.current = animatePath(stateRef.current, tracePath, animSpeed, true);
                 }
-
                 const tDone = window.setInterval(() => {
                   if (stateRef.current.anim.active) return;
                   window.clearInterval(tDone);
@@ -1499,10 +1518,16 @@ export default function App() {
                   }
                   setRenderState(stateRef.current);
 
-                  if (space === "S") createCircleMeta(O, P, R, tracePath, circleZ);
-                  else createCircleMeta(O, P, R, tracePath);
+                  if (space === "S") {
+                    createCircleMeta(O, P, R, tracePath, circleZ);
+                    animatedSphericalCircleRef.current = null;
+                  } else {
+                    createCircleMeta(O, P, R, tracePath);
+                  }
 
-                  pushSnapshot();
+                  returnFrogToCenter(() => {
+                      pushSnapshot();
+                    });
                   setActivePanel(null);
                 }, 25);
               }, 25);
@@ -2082,20 +2107,19 @@ export default function App() {
     withDiskClip(() => {
       // Custom geodesic lines
       for (const L of lines) {
-        // Si on est en sphérique et qu’on a z[], on dessine plein/pointillé selon z
         if (space === "S" && (L as any).z) {
           drawPolylineZ(L.pts, (L as any).z, "#0f172a", 3);
         } else {
           drawPolyline(L.pts, "#0f172a", 3);
         }
-
+      }
 
       // Spherical circles: full circle with front/back (z) => pointillés derrière
       if (space === "S") {
         for (const C of circles) {
           if (C.z) drawPolylineZ(C.poly, C.z, "#0f172a", 3);
+          else drawPolyline(C.poly, "#0f172a", 3);
         }
-      }
       }
 
       // Engine shapes (segments/circles/triangles traced by frog)
@@ -2117,6 +2141,21 @@ export default function App() {
         drawPolyline(sh.pts, sh.color, sh.width);
       }
 
+      const liveSphereCircle = animatedSphericalCircleRef.current;
+      if (space === "S" && liveSphereCircle && st.anim.active) {
+        const maxIndex = liveSphereCircle.path.length - 1;
+
+        // position "courante" dans le chemin animé
+        const prog = Math.max(0, Math.min(maxIndex, st.anim.i + st.anim.t));
+        const k = Math.max(2, Math.min(liveSphereCircle.path.length, Math.floor(prog) + 1));
+
+        drawPolylineZ(
+          liveSphereCircle.path.slice(0, k),
+          liveSphereCircle.z.slice(0, k),
+          "#0f172a",
+          3
+        );
+      }
       // magic reveal for lines
       const ml = magicLineRef.current;
       if (ml && ml.pts.length >= 2) {
@@ -2326,7 +2365,7 @@ export default function App() {
         <div className="left-col">
           <div className="canvas-panel">
             <div className="canvas-wrap">
-              <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} onClick={onCanvasClick} onMouseMove={onMouseMove} />
+              <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} onMouseDown={onCanvasClick} onMouseMove={onMouseMove} />
             </div>
 
             <div className="canvas-actions">
@@ -2410,14 +2449,24 @@ export default function App() {
               {figureCmd === "TRIANGLE" && (
                 <>
                   <label>Type de triangle</label>
-                  <select value={triangleType} onChange={(e) => setTriangleType(e.target.value as any)}>
-                    <option value="ISOSCELES">Triangle isocèle</option>
-                    <option value="EQUILATERAL">Triangle équilatéral</option>
-                    <option value="RIGHT">Triangle rectangle</option>
-                    <option value="ANY">Triangle quelconque</option>
-                  </select>
+
+                  {pointMode === "EXISTING" ? (
+                    <select value="ANY" disabled>
+                      <option value="ANY">Triangle quelconque</option>
+                    </select>
+                  ) : (
+                    <select value={triangleType} onChange={(e) => setTriangleType(e.target.value as any)}>
+                      <option value="ISOSCELES">Triangle isocèle</option>
+                      <option value="EQUILATERAL">Triangle équilatéral</option>
+                      <option value="RIGHT">Triangle rectangle</option>
+                      <option value="ANY">Triangle quelconque</option>
+                    </select>
+                  )}
+
                   <div className="tiny">
-                    Remarque : les points crées peuvent être ajustés automatiquement pour respecter la demande.
+                    {pointMode === "EXISTING"
+                      ? "Avec des points existants, seul un triangle quelconque peut être demandé."
+                      : "Remarque : les points crées peuvent être ajustés automatiquement pour respecter la demande."}
                   </div>
                 </>
               )}
